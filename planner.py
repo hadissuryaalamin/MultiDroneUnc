@@ -80,11 +80,18 @@ class Planner:
 
     def _rollout(self, state: np.ndarray, depth: int) -> float:
         """3. Simulation: estimasi return memakai greedy rollout."""
-        # TODO: pilih aksi lewat _greedy_joint_action lalu panggil simulate.
-        # TODO: akumulasi reward dengan discount factor gamma.
-        # TODO: berhenti saat terminal, batas depth, atau deadline tercapai.
-        # TODO: kembalikan return; rollout tidak menambah node pohon.
-        raise NotImplementedError("TODO: implement greedy rollout")
+        total_return = 0.0
+        discount = 1.0
+        for _ in range(depth):
+            if perf_counter() >= self._deadline:
+                break
+            action = self._greedy_joint_action(state)
+            state, reward, done, _ = self._env.simulate(state, action)
+            total_return += discount * reward
+            if done:
+                break
+            discount *= self._gamma
+        return total_return
 
     def _greedy_joint_action(self, state: np.ndarray) -> int:
         """Susun aksi semua drone; untuk satu drone hanya berisi satu aksi."""
