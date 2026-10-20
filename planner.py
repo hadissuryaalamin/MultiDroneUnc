@@ -95,12 +95,27 @@ class Planner:
 
     def _greedy_joint_action(self, state: np.ndarray) -> int:
         """Susun aksi semua drone; untuk satu drone hanya berisi satu aksi."""
-        # TODO: tiap drone memilih intended destination bebas obstacle,
-        #       di dalam grid, yang paling dekat dengan goal; tie diacak.
-        # TODO: gunakan indeks aksi 0 untuk drone yang sudah mencapai goal.
-        # TODO: jika tidak ada kandidat, pilih aksi per-drone secara acak.
-        # TODO: encode aksi per-drone menjadi satu integer joint action.
-        raise NotImplementedError("TODO: implement greedy joint action")
+        env = self._env
+        vectors = env._action_vectors
+        grid_size = env.obstacles.shape
+        actions = np.zeros(len(state), dtype=np.int32)
+        for i, drone in enumerate(state):
+            if drone[3]:
+                continue
+            destinations = drone[:3] + vectors
+            candidates = np.flatnonzero(
+                np.all((destinations >= 0) & (destinations < grid_size), axis=1)
+            )
+            targets = destinations[candidates]
+            candidates = candidates[~env.obstacles[tuple(targets.T)]]
+            if candidates.size:
+                offsets = destinations[candidates] - env.goals[i]
+                distances = np.einsum("ij,ij->i", offsets, offsets)
+                best = candidates[distances == distances.min()]
+                actions[i] = best[env.rng.integers(best.size)]
+            else:
+                actions[i] = env.rng.integers(len(vectors))
+        return env._encode_action(actions)
 
     def _backpropagate(self, node: Node, action: int, total_return: float) -> None:
         """4. Backpropagation: perbarui statistik node dan aksi ini."""
