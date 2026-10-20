@@ -73,10 +73,10 @@ class Planner:
 
     def _expand(self, node: Node, action: int, next_state: np.ndarray) -> Node:
         """2. Expansion: tambahkan satu successor node baru."""
-        # TODO: buat key dari seluruh next_state, termasuk reached flags.
-        # TODO: buat child dengan statistik awal nol.
-        # TODO: simpan di node.children dan kembalikan child tersebut.
-        raise NotImplementedError("TODO: implement expansion")
+        key = (action, next_state.tobytes())
+        child = Node(next_state)
+        node.children[key] = child
+        return child
 
     def _rollout(self, state: np.ndarray, depth: int) -> float:
         """3. Simulation: estimasi return memakai greedy rollout."""
