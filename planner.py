@@ -45,6 +45,8 @@ class Planner:
         action = self._select_action(node)
         next_state, reward, done, _ = self._env.simulate(node.state, action)
         if done:
+            # Aksi terminal tetap harus dinilai, termasuk goal terakhir/tabrakan.
+            self._backpropagate(node, action, reward)
             return reward
         child = node.children.get((action, next_state.tobytes()))
         if child is None:
