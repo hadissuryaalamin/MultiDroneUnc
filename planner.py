@@ -119,7 +119,7 @@ class Planner:
 
     def _backpropagate(self, node: Node, action: int, total_return: float) -> None:
         """4. Backpropagation: perbarui statistik node dan aksi ini."""
-        # TODO: increment N(s) dan N(s, a).
-        # TODO: perbarui mean Q(s, a) menggunakan total_return.
-        #       Pemanggilan _search yang rekursif meneruskannya sampai root.
-        raise NotImplementedError("TODO: implement backpropagation")
+        node.visits += 1
+        node.action_visits[action] = node.action_visits.get(action, 0) + 1
+        value = node.action_values.get(action, 0.0)
+        node.action_values[action] = value + (total_return - value) / node.action_visits[action]
