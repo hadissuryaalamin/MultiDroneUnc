@@ -43,13 +43,18 @@ class Planner:
         if depth == 0 or perf_counter() >= self._deadline:
             return 0.0
         action = self._select_action(node)
-        # TODO: sample next_state, reward, done lewat self._env.simulate.
-        # TODO: jika terminal, return simulasi = reward.
-        # TODO: jika successor baru, _expand lalu _rollout.
-        #       Jika sudah ada, lanjutkan _search pada child.
-        # TODO: hitung G = reward + gamma * future_return.
-        # TODO: _backpropagate, lalu kembalikan G.
-        raise NotImplementedError("TODO: implement one MCTS iteration")
+        next_state, reward, done, _ = self._env.simulate(node.state, action)
+        if done:
+            return reward
+        child = node.children.get((action, next_state.tobytes()))
+        if child is None:
+            child = self._expand(node, action, next_state)
+            future_return = self._rollout(child.state, depth - 1)
+        else:
+            future_return = self._search(child, depth - 1)
+        G = reward + self._gamma * future_return
+        self._backpropagate(node, action, G)
+        return G
 
     def _select_action(self, node: Node) -> int:
         """1. Selection: pilih aksi yang akan dicoba."""
