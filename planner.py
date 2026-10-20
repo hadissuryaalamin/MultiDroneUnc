@@ -1,3 +1,4 @@
+from math import log, sqrt
 from time import perf_counter
 
 import numpy as np
@@ -39,8 +40,9 @@ class Planner:
 
     def _search(self, node: Node, depth: int) -> float:
         """Satu putaran MCTS; mengembalikan return dari node ini."""
-        # TODO: berhenti jika depth = 0 atau deadline tercapai.
-        # TODO: selection menggunakan _select_action.
+        if depth == 0 or perf_counter() >= self._deadline:
+            return 0.0
+        action = self._select_action(node)
         # TODO: sample next_state, reward, done lewat self._env.simulate.
         # TODO: jika terminal, return simulasi = reward.
         # TODO: jika successor baru, _expand lalu _rollout.
@@ -51,10 +53,18 @@ class Planner:
 
     def _select_action(self, node: Node) -> int:
         """1. Selection: pilih aksi yang akan dicoba."""
-        # TODO: prioritaskan aksi yang belum dicoba, pilih secara acak.
-        # TODO: jika semua sudah dicoba, pilih skor UCB tertinggi:
-        #       Q(s, a) + c * sqrt(log(N(s)) / N(s, a)).
-        raise NotImplementedError("TODO: implement UCB selection")
+        untried_actions = [
+            action for action in range(self._env.num_actions)
+            if node.action_visits.get(action, 0) == 0
+        ]
+        if untried_actions:
+            return untried_actions[self._env.rng.integers(len(untried_actions))]
+        exploration = self._c * sqrt(log(node.visits))
+        return max(
+            range(self._env.num_actions),
+            key=lambda action: node.action_values[action]
+            + exploration / sqrt(node.action_visits[action]),
+        )
 
     def _expand(self, node: Node, action: int, next_state: np.ndarray) -> Node:
         """2. Expansion: tambahkan satu successor node baru."""
