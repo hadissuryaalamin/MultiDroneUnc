@@ -52,17 +52,7 @@ class Planner:
 
                 if is_new:
                     # 3. Rollout from the new child, within the remaining depth.
-                    sim_state = child.state.copy()
-                    discount = 1.0
-                    for _ in range(depth, max_depth):
-                        if perf_counter() >= deadline:
-                            break
-                        sim_action = int(self._rng.choice(self._env.num_actions)) # We can replace to something heuristic
-                        sim_state, rollout_reward, done, info = self._env.simulate(sim_state, sim_action)
-                        reward_sum += discount * rollout_reward
-                        discount *= gamma
-                        if done:
-                            break
+                    reward_sum = self._rollout(child.state, max_depth - depth, deadline)
                     break
 
                 # The outcome already exists: continue selection from its node.
@@ -80,6 +70,24 @@ class Planner:
         scores = np.where(tried, root.Q, -np.inf)
         best_action = int(np.argmax(scores))
         return best_action
+
+    def _rollout(self, state: np.ndarray, depth: int, deadline: float) -> float:
+        """Estimate a state's value with a random policy within the remaining budget."""
+        sim_state = state.copy()
+        reward_sum = 0.0
+        discount = 1.0
+
+        for _ in range(depth):
+            if perf_counter() >= deadline:
+                break
+            sim_action = int(self._rng.choice(self._env.num_actions))
+            sim_state, reward, done, info = self._env.simulate(sim_state, sim_action)
+            reward_sum += discount * reward
+            discount *= self._config.discount_factor
+            if done:
+                break
+
+        return reward_sum
 
 
     def _selection(self, node: Node) -> int:
