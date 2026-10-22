@@ -8,7 +8,7 @@ class Node:
         self.state = state.copy()
         self.N = np.zeros(num_actions)
         self.Q = np.zeros(num_actions)
-        self.children = [None] * num_actions
+        self.children = {}  # (action, next_state.tobytes()) -> Node
 
 
 class Planner:
@@ -22,31 +22,56 @@ class Planner:
     def plan(self, current_state: np.ndarray, planning_time_per_step: float) -> int:
         deadline = perf_counter() + planning_time_per_step
         root = Node(current_state, self._env.num_actions)
+        gamma = self._config.discount_factor
+        max_depth = self._config.max_num_steps
 
         while perf_counter() < deadline:
-            # 1. Selection
-            action = self._selection(root)
-            next_state, reward, done, info = self._env.simulate(root.state, action)
-            # 2. Expansion
-            child = Node(next_state, self._env.num_actions)
-            root.children[action] = child
-            # 3. Simulation from child node
-            reward_sum = reward  # Include the reward from root to child.
-            discount = self._config.discount_factor
-            sim_state = next_state.copy()
-            for _ in range(self._config.max_num_steps):  # Simulate for a fixed number of steps
-                if done or perf_counter() >= deadline:
-                    break
-                sim_action = np.random.choice(self._env.num_actions) # random or we can use a policy based on sim_state eg heuristic distance to goal
-                sim_state, rollout_reward, done, info = self._env.simulate(sim_state, sim_action)
-                reward_sum += discount * rollout_reward
-                discount *= self._config.discount_factor
+            node = root
+            path = []
+            depth = 0
+            reward_sum = 0.0
+
+            while depth < max_depth and perf_counter() < deadline:
+                # 1. Selection: sample a fresh outcome for the selected action.
+                action = self._selection(node)
+                next_state, reward, done, info = self._env.simulate(node.state, action)
+                path.append((node, action, reward))
+                depth += 1
+
+                # 2. Expansion: preserve each distinct outcome of this action.
+                key = (action, next_state.tobytes())
+                child = node.children.get(key)
+                is_new = child is None
+                if is_new:
+                    child = Node(next_state, self._env.num_actions)
+                    node.children[key] = child
+
                 if done:
                     break
-            # 4. Backpropagation
-            root.N[action] += 1
-            # Incrementally update the mean return for this action.
-            root.Q[action] += (reward_sum - root.Q[action]) / root.N[action]
+
+                if is_new:
+                    # 3. Rollout from the new child, within the remaining depth.
+                    sim_state = child.state.copy()
+                    discount = 1.0
+                    for _ in range(depth, max_depth):
+                        if perf_counter() >= deadline:
+                            break
+                        sim_action = np.random.choice(self._env.num_actions)
+                        sim_state, rollout_reward, done, info = self._env.simulate(sim_state, sim_action)
+                        reward_sum += discount * rollout_reward
+                        discount *= gamma
+                        if done:
+                            break
+                    break
+
+                # The outcome already exists: continue selection from its node.
+                node = child
+
+            # 4. Backpropagation: update every selected action along the path.
+            for node, action, reward in reversed(path):
+                reward_sum = reward + gamma * reward_sum
+                node.N[action] += 1
+                node.Q[action] += (reward_sum - node.Q[action]) / node.N[action]
 
         tried = root.N > 0
         if not tried.any():
