@@ -1,19 +1,19 @@
 import numpy as np
 from multi_drone import MultiDroneUnc
 
-NUM_SIM_STEPS = 100
-
 class Node:
-    def __init__(self, state: np.ndarray, num_moves: int):
+    def __init__(self, state: np.ndarray, num_actions: int):
         self.state = state.copy()
-        self.N = np.zeros(num_moves)
-        self.Q = np.zeros(num_moves)
-        self.children = [None] * num_moves
+        self.N = np.zeros(num_actions)
+        self.Q = np.zeros(num_actions)
+        self.children = [None] * num_actions
 
 
 class Planner:
     def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: int = 1.0):
         self._env = env
+        # The runner passes an environment that has already loaded the YAML config.
+        self._config = env.get_config()
         self._a_param = a_param
         self._b_param = b_param
 
@@ -23,26 +23,26 @@ class Planner:
         hist = []
         # Inside Loop
         # 1. Selection
-        root = Node(current_state, self._env.num_moves)
+        root = Node(current_state, self._env.num_actions)
         action = self._selection(root)
-        next_state, reward, done, info = self._env.step(action)
+        next_state, reward, done, info = self._env.simulate(current_state, action)
         if (current_state, action, next_state) not in hist:
             hist.append((current_state, action, next_state))
             # 2. Expansion
-            child = Node(next_state, self._env.num_moves)
+            child = Node(next_state, self._env.num_actions)
             root.children[action] = child
             # 3. Simulation from child node
             reward_sum = 0
             sim_state = next_state.copy()
-            for _ in range(NUM_SIM_STEPS):  # Simulate for a fixed number of steps
-                sim_action = np.random.choice(self._env.num_moves) # random or we can use a policy based on sim_state eg heuristic distance to goal
+            for _ in range(self._config.max_num_steps):  # Simulate for a fixed number of steps
+                sim_action = np.random.choice(self._env.num_actions) # random or we can use a policy based on sim_state eg heuristic distance to goal
                 sim_state, reward, done, info = self._env.simulate(sim_state, sim_action)
                 reward_sum += reward
                 if done:
                     break
             # 4. Backpropagation
             root.N[action] += 1
-            root.Q[action] += reward_sum - STEP_COST # this from config
+            root.Q[action] += reward_sum
             best_action = int(np.argmax(root.Q))
             return best_action
 
