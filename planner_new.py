@@ -48,7 +48,11 @@ class Planner:
             # Incrementally update the mean return for this action.
             root.Q[action] += (reward_sum - root.Q[action]) / root.N[action]
 
-        best_action = int(np.argmax(root.Q))
+        tried = root.N > 0
+        if not tried.any():
+            return 0  # No simulations completed within the time budget.
+        scores = np.where(tried, root.Q, -np.inf)
+        best_action = int(np.argmax(scores))
         return best_action
 
     
