@@ -1,3 +1,5 @@
+from time import perf_counter
+
 import numpy as np
 from multi_drone import MultiDroneUnc
 
@@ -18,16 +20,13 @@ class Planner:
         self._b_param = b_param
 
     def plan(self, current_state: np.ndarray, planning_time_per_step: float) -> int:
-        # This doesn't do anything useful. It simply returns the action 
-        # representen by integer 0.
-        hist = []
-        # Inside Loop
-        # 1. Selection
+        deadline = perf_counter() + planning_time_per_step
         root = Node(current_state, self._env.num_actions)
-        action = self._selection(root)
-        next_state, reward, done, info = self._env.simulate(current_state, action)
-        if (current_state, action, next_state) not in hist:
-            hist.append((current_state, action, next_state))
+
+        while perf_counter() < deadline:
+            # 1. Selection
+            action = self._selection(root)
+            next_state, reward, done, info = self._env.simulate(root.state, action)
             # 2. Expansion
             child = Node(next_state, self._env.num_actions)
             root.children[action] = child
@@ -35,6 +34,8 @@ class Planner:
             reward_sum = 0
             sim_state = next_state.copy()
             for _ in range(self._config.max_num_steps):  # Simulate for a fixed number of steps
+                if perf_counter() >= deadline:
+                    break
                 sim_action = np.random.choice(self._env.num_actions) # random or we can use a policy based on sim_state eg heuristic distance to goal
                 sim_state, reward, done, info = self._env.simulate(sim_state, sim_action)
                 reward_sum += reward
@@ -43,8 +44,9 @@ class Planner:
             # 4. Backpropagation
             root.N[action] += 1
             root.Q[action] += reward_sum
-            best_action = int(np.argmax(root.Q))
-            return best_action
+
+        best_action = int(np.argmax(root.Q))
+        return best_action
 
     
     def _selection(self, node: Node) -> int:
