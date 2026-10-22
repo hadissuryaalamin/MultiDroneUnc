@@ -6,122 +6,119 @@ from multi_drone import MultiDroneUnc
 
 
 class Node:
-    """Satu state dalam pohon pencarian MCTS."""
-
-    def __init__(self, state: np.ndarray):
+    def __init__(self, state: np.ndarray, num_actions: int):
         self.state = state.copy()
-        self.visits = 0
-        self.action_visits = {}  # N(s, a)
-        self.action_values = {}  # Q(s, a): rata-rata return
-        self.children = {}       # (action, successor_state_key) -> Node
+        self.N = np.zeros(num_actions)
+        self.Q = np.zeros(num_actions)
+        self.children = {}
 
 
 class Planner:
     def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: int = 1.0):
-        self._env = env
-        # Parameter placeholder dari starter; tetap cocok dengan run_planner.py.
-        self._a_param = a_param
-        self._b_param = b_param
-        self._root = None
-
+        # a_param and b_param are only kept for compatibility with run_planner.py.
+        self.env = env
         config = env.get_config()
-        self._gamma = config.discount_factor
-        self._c = np.sqrt(2.0)
-        self._H = config.max_num_steps
-        self._deadline = 0.0
+        self.gamma = config.discount_factor
+        self.max_depth = config.max_num_steps
+        self.c = sqrt(2.0)
 
-    def plan(self, current_state: np.ndarray, planning_time_per_step: float) -> int:
-        """Planning dari state saat ini untuk memilih SATU aksi nyata."""
-        self._root = Node(current_state)
-        self._deadline = perf_counter() + planning_time_per_step
-        while perf_counter() < self._deadline:
-            self._search(self._root, self._H)
-        return max(self._root.action_values, key=self._root.action_values.get)
+        # Information for the greedy rollout, taken from the config only (README rule:
+        # the planner may only use simulate, get_config and num_actions).
+        self.rng = np.random.default_rng(config.seed)
+        dzs = (-1, 0, 1) if config.change_altitude else (0,)
+        self.moves = np.array([
+            (dx, dy, dz)
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for dz in dzs
+            if (dx, dy, dz) != (0, 0, 0)
+        ])  # same order as the simulator's per-drone actions
+        self.goals = np.array(config.goal_positions)
+        self.grid_size = np.array(config.grid_size)
+        self.obstacles = np.zeros(config.grid_size, dtype=bool)
+        for cell in config.obstacle_cells or []:
+            self.obstacles[tuple(cell)] = True
 
-    def _search(self, node: Node, depth: int) -> float:
-        """Satu putaran MCTS; mengembalikan return dari node ini."""
-        if depth == 0 or perf_counter() >= self._deadline:
-            return 0.0
-        action = self._select_action(node)
-        next_state, reward, done, _ = self._env.simulate(node.state, action)
-        if done:
-            # Aksi terminal tetap harus dinilai, termasuk goal terakhir/tabrakan.
-            self._backpropagate(node, action, reward)
-            return reward
-        child = node.children.get((action, next_state.tobytes()))
-        if child is None:
-            child = self._expand(node, action, next_state)
-            future_return = self._rollout(child.state, depth - 1)
-        else:
-            future_return = self._search(child, depth - 1)
-        G = reward + self._gamma * future_return
-        self._backpropagate(node, action, G)
-        return G
+    def plan(self, state: np.ndarray, planning_time_per_step: float) -> int:
+        num_actions = self.env.num_actions
+        root = Node(state, num_actions)
+        self.deadline = perf_counter() + planning_time_per_step
 
-    def _select_action(self, node: Node) -> int:
-        """1. Selection: pilih aksi yang akan dicoba."""
-        untried_actions = [
-            action for action in range(self._env.num_actions)
-            if node.action_visits.get(action, 0) == 0
-        ]
-        if untried_actions:
-            return untried_actions[self._env.rng.integers(len(untried_actions))]
-        exploration = self._c * sqrt(log(node.visits))
-        return max(
-            range(self._env.num_actions),
-            key=lambda action: node.action_values[action]
-            + exploration / sqrt(node.action_visits[action]),
-        )
+        while perf_counter() < self.deadline:
+            # One MCTS simulation. path records the visited (node, action, reward) triples.
+            path = []
+            node, depth, G = root, self.max_depth, 0.0
 
-    def _expand(self, node: Node, action: int, next_state: np.ndarray) -> Node:
-        """2. Expansion: tambahkan satu successor node baru."""
-        key = (action, next_state.tobytes())
-        child = Node(next_state)
-        node.children[key] = child
-        return child
+            while depth > 0 and perf_counter() < self.deadline:
+                # 1. Selection
+                action = self._selection(node)
+                next_state, reward, done, _ = self.env.simulate(node.state, action)
+                path.append((node, action, reward))
+                depth -= 1
+                if done:
+                    break
+
+                key = (action, next_state.tobytes())
+                child = node.children.get(key)
+                if child is None:
+                    # 2. Expansion: add a new node, then 3. Rollout from that node.
+                    node.children[key] = Node(next_state, num_actions)
+                    G = self._rollout(next_state, depth)
+                    break
+                node = child
+
+            # 4. Backpropagation: from bottom to top, G = reward + gamma * G.
+            for node, action, reward in reversed(path):
+                G = reward + self.gamma * G
+                node.N[action] += 1
+                node.Q[action] += (G - node.Q[action]) / node.N[action]
+
+        if not root.N.any():
+            return self._greedy(state)
+        # Choose the action with the highest mean return among the tried actions.
+        tried = root.N > 0                              # actions that have been tried
+        scores = np.where(tried, root.Q, -np.inf)       # untried actions get -inf
+        best_action = np.argmax(scores)                 # index with the highest Q
+        return int(best_action)
+
+    def _selection(self, node: Node) -> int:
+        """Try untried actions first, then use UCB."""
+        untried = np.flatnonzero(node.N == 0)
+        if untried.size:
+            return int(self.rng.choice(untried))
+        ucb = node.Q + self.c * np.sqrt(log(node.N.sum()) / node.N)
+        return int(np.argmax(ucb))
 
     def _rollout(self, state: np.ndarray, depth: int) -> float:
-        """3. Simulation: estimasi return memakai greedy rollout."""
-        total_return = 0.0
-        discount = 1.0
+        """Simulation: run the greedy policy and sum the discounted rewards."""
+        G, discount = 0.0, 1.0
         for _ in range(depth):
-            if perf_counter() >= self._deadline:
+            if perf_counter() >= self.deadline:
                 break
-            action = self._greedy_joint_action(state)
-            state, reward, done, _ = self._env.simulate(state, action)
-            total_return += discount * reward
+            state, reward, done, _ = self.env.simulate(state, self._greedy(state))
+            G += discount * reward
             if done:
                 break
-            discount *= self._gamma
-        return total_return
+            discount *= self.gamma
+        return G
 
-    def _greedy_joint_action(self, state: np.ndarray) -> int:
-        """Susun aksi semua drone; untuk satu drone hanya berisi satu aksi."""
-        env = self._env
-        vectors = env._action_vectors
-        grid_size = env.obstacles.shape
-        actions = np.zeros(len(state), dtype=np.int32)
+    def _greedy(self, state: np.ndarray) -> int:
+        """Each drone picks the valid move closest to its goal."""
+        m = len(self.moves)
+        joint_action = 0
+
         for i, drone in enumerate(state):
-            if drone[3]:
-                continue
-            destinations = drone[:3] + vectors
-            candidates = np.flatnonzero(
-                np.all((destinations >= 0) & (destinations < grid_size), axis=1)
-            )
-            targets = destinations[candidates]
-            candidates = candidates[~env.obstacles[tuple(targets.T)]]
-            if candidates.size:
-                offsets = destinations[candidates] - env.goals[i]
-                distances = np.einsum("ij,ij->i", offsets, offsets)
-                best = candidates[distances == distances.min()]
-                actions[i] = best[env.rng.integers(best.size)]
-            else:
-                actions[i] = env.rng.integers(len(vectors))
-        return env._encode_action(actions)
+            action = 0  # drone already at its goal: the simulator ignores its action
+            if not drone[3]:
+                dest = drone[:3] + self.moves
+                valid = np.all((dest >= 0) & (dest < self.grid_size), axis=1)
+                valid[valid] = ~self.obstacles[tuple(dest[valid].T)]
+                if valid.any():
+                    dist = np.where(valid, ((dest - self.goals[i]) ** 2).sum(axis=1), np.inf)
+                    action = self.rng.choice(np.flatnonzero(dist == dist.min()))
+                else:
+                    action = self.rng.integers(m)
+            # Encode the joint action: sum a_i * m^i.
+            joint_action += int(action) * m ** i
 
-    def _backpropagate(self, node: Node, action: int, total_return: float) -> None:
-        """4. Backpropagation: perbarui statistik node dan aksi ini."""
-        node.visits += 1
-        node.action_visits[action] = node.action_visits.get(action, 0) + 1
-        value = node.action_values.get(action, 0.0)
-        node.action_values[action] = value + (total_return - value) / node.action_visits[action]
+        return joint_action
