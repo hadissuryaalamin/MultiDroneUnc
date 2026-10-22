@@ -16,6 +16,7 @@ class Planner:
         self._env = env
         # The runner passes an environment that has already loaded the YAML config.
         self._config = env.get_config()
+        self._rng = np.random.default_rng(self._config.seed)
         self._a_param = a_param
         self._b_param = b_param
 
@@ -56,7 +57,7 @@ class Planner:
                     for _ in range(depth, max_depth):
                         if perf_counter() >= deadline:
                             break
-                        sim_action = np.random.choice(self._env.num_actions) # We can replace to something heuristic
+                        sim_action = int(self._rng.choice(self._env.num_actions)) # We can replace to something heuristic
                         sim_state, rollout_reward, done, info = self._env.simulate(sim_state, sim_action)
                         reward_sum += discount * rollout_reward
                         discount *= gamma
@@ -85,6 +86,6 @@ class Planner:
         """Select the action with the highest UCB value."""
         untried = np.flatnonzero(node.N == 0)
         if untried.size:
-            return np.random.choice(untried)
+            return int(self._rng.choice(untried))
         ucb = node.Q + np.sqrt(2 * np.log(node.N.sum()) / node.N)
         return int(np.argmax(ucb))
