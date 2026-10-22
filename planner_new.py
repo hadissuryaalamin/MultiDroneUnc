@@ -45,7 +45,8 @@ class Planner:
                     break
             # 4. Backpropagation
             root.N[action] += 1
-            root.Q[action] += reward_sum
+            # Incrementally update the mean return for this action.
+            root.Q[action] += (reward_sum - root.Q[action]) / root.N[action]
 
         best_action = int(np.argmax(root.Q))
         return best_action
