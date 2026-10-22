@@ -31,14 +31,16 @@ class Planner:
             child = Node(next_state, self._env.num_actions)
             root.children[action] = child
             # 3. Simulation from child node
-            reward_sum = 0
+            reward_sum = reward  # Include the reward from root to child.
+            discount = self._config.discount_factor
             sim_state = next_state.copy()
             for _ in range(self._config.max_num_steps):  # Simulate for a fixed number of steps
                 if perf_counter() >= deadline:
                     break
                 sim_action = np.random.choice(self._env.num_actions) # random or we can use a policy based on sim_state eg heuristic distance to goal
-                sim_state, reward, done, info = self._env.simulate(sim_state, sim_action)
-                reward_sum += reward
+                sim_state, rollout_reward, done, info = self._env.simulate(sim_state, sim_action)
+                reward_sum += discount * rollout_reward
+                discount *= self._config.discount_factor
                 if done:
                     break
             # 4. Backpropagation
