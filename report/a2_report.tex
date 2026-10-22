@@ -1,0 +1,393 @@
+% =====================================================================
+% COMP4620/8620 - Advanced Topics in AI: Intelligent Robotics
+% Semester 2 2026 - Assignment 2 report template
+% Compile: pdflatex a2_report.tex (run twice for references)
+% Submit the PDF together with a .zip/.7z/.tar.gz of code + test cases.
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{subcaption}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black, citecolor=blue!50!black}
+\lstset{basicstyle=\ttfamily\small, breaklines=true, frame=single, columns=fullflexible}
+
+% Placeholder marker - search for \todo and remove before submitting
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+
+\title{COMP4620/8620 Advanced Topics in AI: Intelligent Robotics\\
+       Assignment 2 Report}
+\author{Hadis Amin - u8050066}
+\date{}
+
+\begin{document}
+\maketitle
+
+
+% =====================================================================
+\section*{Part A}
+% =====================================================================
+
+% ---------------------------------------------------------------------
+\subsection*{A1. State abstraction of the 1-D grid MDP}
+
+No. Abstracting the state into $L$ and $R$ does not turn this into an MDP. An MDP assumes the agent knows exactly which state it is in. Here the true state is still uncertain: we only believe the agent is somewhere on the left side or the right side, not exactly where. The agent therefore still needs a belief, a probability distribution over the possible states, so the problem remains a POMDP.
+
+% ---------------------------------------------------------------------
+\subsection*{A2. $\alpha$-vector policy representation}
+
+Let $b = (p, 1-p)$ where $p = b(s_1)\in[0,1]$. Then
+$\alpha\cdot b = \alpha(s_1)\,p + \alpha(s_2)\,(1-p)$.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+$\alpha$ & vector & $V_\alpha(p) = \alpha\cdot b$ \\
+\midrule
+$\alpha_1$ & $[10,-5]$  & $15p - 5$ \\
+$\alpha_2$ & $[-5,10]$  & $-15p + 10$ \\
+$\alpha_3$ & $[4,4]$    & $4$ \\
+$\alpha_4$ & $[1,2]$    & $-p + 2$ \\
+$\alpha_5$ & $[5.5,1]$  & $4.5p + 1$ \\
+\bottomrule
+\end{tabular}
+\caption{Value of each $\alpha$-vector as a function of $p=b(s_1)$.}
+\end{table}
+
+\paragraph{(a) Belief intervals where each $\alpha$-vector is maximal.}
+Figure~\ref{fig:alpha-vectors} plots the five lines over $p\in[0,1]$. The shaded upper surface is made of three segments: $\alpha_2$ on the left, $\alpha_3$ in the middle and $\alpha_1$ on the right. The breakpoints (marked in the figure) are the intersections
+$\alpha_2 = \alpha_3 \Rightarrow -15p + 10 = 4 \Rightarrow p = 0.4$ and
+$\alpha_3 = \alpha_1 \Rightarrow 15p - 5 = 4 \Rightarrow p = 0.6$.
+The figure also shows that $\alpha_4$ and $\alpha_5$ lie strictly below the surface everywhere: $\alpha_4$ never exceeds $2 < 4$, and $\alpha_5$ is below $\alpha_3$ on $[0, 2/3)$ and below $\alpha_1$ for $p > 4/7$, so neither is ever maximal. The resulting intervals are summarised in Table~\ref{tab:alpha-intervals}.
+\begin{table}[H]
+\centering
+\begin{tabular}{lc}
+\toprule
+$\alpha$ & Interval of $p=b(s_1)$ where maximal \\
+\midrule
+$\alpha_1$ & $[0.6,\, 1]$ \\
+$\alpha_2$ & $[0,\, 0.4]$ \\
+$\alpha_3$ & $[0.4,\, 0.6]$ \\
+$\alpha_4$ & never \\
+$\alpha_5$ & never \\
+\bottomrule
+\end{tabular}
+\caption{Belief intervals where each $\alpha$-vector is maximal (read off Figure~\ref{fig:alpha-vectors}).}
+\label{tab:alpha-intervals}
+\end{table}
+\begin{figure}[H]\centering
+  \includegraphics[width=0.7\linewidth]{figures/alpha_vectors.pdf}
+  \caption{The five $\alpha$-vectors over $p\in[0,1]$ and the upper surface of $\Gamma$ (shaded), with breakpoints at $p=0.4$ and $p=0.6$.}
+  \label{fig:alpha-vectors}
+\end{figure}
+
+\paragraph{(b) Pruning by pointwise dominance.}
+From Figure~\ref{fig:alpha-vectors}, $\alpha_4$ and $\alpha_5$ lie strictly below the maximum for every belief $p\in[0,1]$, so both can be removed by pointwise dominance. The maximum is
+\[
+V_{\max}(p)=\begin{cases}
+V_{\alpha_2}(p)=10-15p, & 0\le p\le 0.4,\\
+V_{\alpha_3}(p)=4, & 0.4<p<0.6,\\
+V_{\alpha_1}(p)=15p-5, & 0.6\le p\le 1.
+\end{cases}
+\]
+For all $p\in[0,1]$, $V_{\alpha_4}(p)=2-p<V_{\max}(p)$ and $V_{\alpha_5}(p)=4.5p+1<V_{\max}(p)$. The dominating vector may differ with $p$. In contrast, $\alpha_1$, $\alpha_2$ and $\alpha_3$ each attain the maximum on an interval, so they cannot be removed.
+
+% ---------------------------------------------------------------------
+\subsection*{A3. Pedestrian avoidance: MDP vs POMDP}
+
+\paragraph{Scenario where MDP is suitable.}
+\begin{itemize}[nosep]
+  \item S: [car\_position, pedestrian\_position]
+  \item A: [Stay, Move]
+\end{itemize}
+Sensors accurately identify both positions. Assume movement is discrete and the next state depends only on the current positions and action. An MDP policy maps the observed state to the best action: if a pedestrian blocks the cell ahead, choose Stay; otherwise, choose Move when safe. Since the complete state is observed, a POMDP belief is unnecessary.
+
+\paragraph{Scenario where POMDP is suitable.}
+\todo{Describe the scenario, e.g.\ what part of the state the car cannot observe even with good sensors (pedestrian intention/destination?).}
+\begin{itemize}[nosep]
+  \item State (observed and hidden parts): \todo{}
+  \item Observations: \todo{}
+  \item Why reasoning over a belief changes the decision: \todo{}
+\end{itemize}
+
+% =====================================================================
+\section*{Part B}
+% =====================================================================
+
+% ---------------------------------------------------------------------
+\subsection*{B1. MDP framing of multi-drone navigation}
+
+\begin{itemize}
+  \item \textbf{State space} $S$: each state contains the positions of all $N$ drones, $s=(p_1,\dots,p_N)$, where $p_i=(x_i,y_i,z_i)$. 
+  \item \textbf{Action space} $A$: A joint action $a=(a_1,\dots,a_N)$ specifies the simultaneous action of every drone. Thus, $A=A_1\times\dots\times A_N$ and $|A|=26^N$. For example, two drones have $26^2=676$ joint actions.
+  \item \textbf{Transition function} $T(s,a,s') = T_{known}$
+  \item \textbf{Reward function} for $N$ drones is the sum over all drones:
+  \[
+    R(s,a,s') = \sum_{i=1}^{N} R_i(s,a,s'),
+  \]
+  where
+  \[
+    R_i(s,a,s') = -1 + \begin{cases}
+      -50, & \text{if drone $i$ collides},\\
+      100, & \text{if drone $i$ reaches its goal}.
+    \end{cases}
+  \]
+  \item \textbf{Discount factor} $\gamma$: \todo{e.g.\ 0.99}
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\subsection*{B2. Approximate on-line MDP solver}
+
+\paragraph{Overview.} We use Monte Carlo Tree Search (MCTS) with UCT selection and a greedy rollout policy. At each decision step, the planner builds a search tree rooted at the current joint state within the available planning time (at most 10 seconds, without parallelisation). It estimates action values through sampled transitions and discounted returns, then executes the action with the highest estimated value at the root. Sampling avoids enumerating all possible successor states, although a large joint action space remains a limitation.
+
+\subsubsection*{Component specification}
+\begin{itemize}[leftmargin=*, itemsep=0.5em]
+  \item \textbf{Selection:} Randomly select an untried action first. Once every action has been tried, use UCB to select $a \leftarrow \arg\max_a \big[Q(s,a)+c\sqrt{\ln N(s)/N(s,a)}\big]$.
+  \item \textbf{Expansion:} Add one new child for the sampled successor state and initialise its visit counts and action values to zero.
+  \item \textbf{Simulation:} Use a greedy rollout: each drone moves closest to its goal. Estimate the new child's value by the discounted return $\hat V=\sum_{t=0}^{T-1}\gamma^t r_t$, stopping at a terminal state or the rollout depth limit.
+  \item \textbf{Backpropagation:} Back up the discounted return to the root, updating the mean action value $Q(s,a)$ and incrementing the visit counts at each step.
+\end{itemize}
+
+\clearpage
+\subsubsection*{Pseudocode}
+
+Let $A$ be the set of joint-action integers, $\gamma$ the configured discount factor, $H$ the search depth limit (the configured maximum number of steps), and $c>0$ the UCB exploration constant. Each node $v$ stores its joint state $s(v)$, action counts $N(v,a)$, mean returns $Q(v,a)$, and successor nodes $C(v,a,s')$; its visit count is $N(v)=\sum_{a} N(v,a)$. A new node has zero counts and values, and no children; untried actions are represented implicitly. Each iteration descends the tree iteratively, records the visited $(v,a,r)$ triples in a path, and backs up the return along that path in reverse. All functions share the planning deadline.
+
+\begingroup
+\SetKwProg{Fn}{Function}{:}{end}
+\SetKwFunction{Plan}{Plan}
+\SetKwFunction{Select}{Select}
+\SetKwFunction{Rollout}{Rollout}
+\SetKwFunction{Greedy}{GreedyJointAction}
+\SetKwFunction{NewNode}{NewNode}
+\SetKw{Return}{return}
+\SetAlgoNlRelativeSize{-1}
+
+\begin{algorithm}[H]
+\small
+\caption{Online MCTS with UCT selection}
+\label{alg:mcts-uct}
+\Fn{\Plan{$s_0$, timeBudget}}{
+  $root \leftarrow \NewNode(s_0)$\;
+  $deadline \leftarrow now() + timeBudget$\;
+  \While{$now() < deadline$}{
+    $path \leftarrow [\,]$; $v \leftarrow root$; $d \leftarrow H$; $G \leftarrow 0$\;
+    \tcp{Selection, expansion and simulation}
+    \While{$d>0$ and $now() < deadline$}{
+      $a \leftarrow \Select(v)$\;
+      $(s',r,done,info) \leftarrow env.simulate(s(v),a)$\;
+      append $(v,a,r)$ to $path$; $d \leftarrow d-1$\;
+      \If{$done$}{\textbf{break}\;}
+      \If{$C(v,a,s')$ does not exist}{
+        $C(v,a,s') \leftarrow \NewNode(s')$\;
+        $G \leftarrow \Rollout(s',d)$\;
+        \textbf{break}\;
+      }
+      $v \leftarrow C(v,a,s')$\;
+    }
+    \tcp{Backpropagation}
+    \ForEach{$(v,a,r)$ in $path$, in reverse order}{
+      $G \leftarrow r+\gamma G$\;
+      $N(v,a) \leftarrow N(v,a)+1$\;
+      $Q(v,a) \leftarrow Q(v,a)+\frac{G-Q(v,a)}{N(v,a)}$\;
+    }
+  }
+  \If{no action has been tried at $root$}{
+    \Return \Greedy{$s_0$}\;
+  }
+  \Return $\arg\max_{a:\,N(root,a)>0} Q(root,a)$\;
+}
+\BlankLine
+\Fn{\Select{$v$}}{
+  \If{there exists $a\in A$ with $N(v,a)=0$}{
+    \Return a uniformly sampled untried joint action\;
+  }
+  \Return $\arg\max_{a\in A}\left[Q(v,a)+c\sqrt{\frac{\ln N(v)}{N(v,a)}}\right]$\;
+}
+\end{algorithm}
+
+\clearpage
+\begin{algorithm}[H]
+\small
+\caption{Greedy rollout and joint-action construction}
+\label{alg:greedy-rollout}
+\Fn{\Rollout{$s,d$}}{
+  $G \leftarrow 0$; $w \leftarrow 1$\;
+  \For{$t\leftarrow 1$ \KwTo $d$}{
+    \If{$now() \ge deadline$}{\textbf{break}\;}
+    $a \leftarrow \Greedy(s)$\;
+    $(s',r,done,info) \leftarrow env.simulate(s,a)$\;
+    $G \leftarrow G+w\,r$\;
+    \If{$done$}{\textbf{break}\;}
+    $s \leftarrow s'$; $w \leftarrow w\gamma$\;
+  }
+  \Return $G$\;
+}
+\BlankLine
+\Fn{\Greedy{$s$}}{
+  \For{each drone $i$}{
+    \eIf{drone $i$ has already reached its goal}{
+      $a_i \leftarrow 0$ \tcp*{The simulator keeps it at its goal.}
+    }{
+      $F_i \leftarrow$ moves with intended destinations inside free grid cells\;
+      \eIf{$F_i\ne\varnothing$}{
+        $a_i \leftarrow \arg\min_{u\in F_i}\|p_i+\Delta(u)-g_i\|_2$\;
+        Break ties uniformly at random\;
+      }{
+        $a_i \leftarrow$ uniformly sample a per-drone action\;
+      }
+    }
+  }
+  \Return $\sum_{i=1}^{N}a_i m^{i-1}$, where $m$ is the number of per-drone actions\;
+}
+\end{algorithm}
+\endgroup
+
+\noindent Here $p_i$ and $g_i$ are drone $i$'s current and goal positions, and $\Delta(u)$ is the displacement of per-drone action $u$. Action indices run from $0$ to $m-1$, where $m=8$ without altitude changes and $m=26$ otherwise. The grid size, obstacle cells, goal positions and per-drone moves are read from the environment configuration (\texttt{get\_config()}), so the planner only uses \texttt{simulate}, \texttt{get\_config} and \texttt{num\_actions}. The greedy policy evaluates intended destinations only; the simulator samples actual motion and detects both obstacle and inter-drone collisions. Each simulated transition uses the simulator's reward and terminal signal. Since transitions are stochastic, the same action can have multiple successor nodes. When the depth limit or deadline is reached, the remaining return is approximated as zero. The main execution loop applies the selected action using \texttt{env.step}, observes the next joint state, and calls \Plan{} again.
+
+% ---------------------------------------------------------------------
+\subsection*{B4. Empirical investigation of problem complexity}
+
+\subsubsection*{Experimental setup}
+\begin{itemize}[nosep]
+  \item Hardware / Python version: \todo{}
+  \item Planning time per step: \todo{}; max steps: \todo{}; $\alpha$: \todo{}; reward parameters: \todo{}
+  \item Runs per scenario: \todo{$n$}; random seeds: \todo{}
+  \item 95\% CI computed as $\bar{x} \pm t_{0.975,\,n-1}\, s/\sqrt{n}$ \todo{(or Wilson interval for success rate)}.
+\end{itemize}
+
+\paragraph{Performance metrics.}
+\begin{itemize}[nosep]
+  \item Success rate (all drones reach goal without collision)
+  \item Total discounted reward
+  \item Number of steps to completion (successful runs)
+  \item Collision rate
+  \item \todo{Tree statistics: simulations per step, average tree depth, etc.}
+\end{itemize}
+
+\paragraph{Complexity factors and how each is varied (one factor at a time).}
+\begin{table}[H]
+\centering
+\begin{tabular}{p{2.8cm}p{5.2cm}p{6.6cm}}
+\toprule
+Set & Varied factor (others fixed) & What we expect to learn \\
+\midrule
+S: State space  & \todo{grid size, e.g.\ $5^3, 10^3, 15^3, 20^3$; drones fixed} & \todo{effect of longer horizons / sparser goal reward} \\
+A: Action space & \todo{number of drones $N$ and/or altitude change (8 vs 26 per drone)} & \todo{effect of branching factor on search breadth} \\
+C: Clutter      & \todo{number/density of obstacles, narrow passages} & \todo{effect on rollout quality and collision risk} \\
+\bottomrule
+\end{tabular}
+\caption{Experiment design. \todo{Note that increasing $N$ also grows $|S|$; explain how the design separates the two factors.}}
+\end{table}
+
+\paragraph{Scenario list.}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llccccc}
+\toprule
+ID & Set & Grid & $N$ & Altitude change & \#Obstacles & $|A|$ \\
+\midrule
+S1 & S & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+S2 & S & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+S3 & S & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+A1 & A & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+A2 & A & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+A3 & A & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+C1 & C & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+C2 & C & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+C3 & C & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+\bottomrule
+\end{tabular}
+\caption{Testing scenarios. Config files in \texttt{\todo{experiments/configs/}}.}
+\end{table}
+
+\subsubsection*{Results}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+ID & Success rate (95\% CI) & Discounted reward (mean $\pm$ CI) & Steps (mean $\pm$ CI) & Sims/step (mean) \\
+\midrule
+S1 & \todo{} & \todo{} & \todo{} & \todo{} \\
+S2 & \todo{} & \todo{} & \todo{} & \todo{} \\
+S3 & \todo{} & \todo{} & \todo{} & \todo{} \\
+\midrule
+A1 & \todo{} & \todo{} & \todo{} & \todo{} \\
+A2 & \todo{} & \todo{} & \todo{} & \todo{} \\
+A3 & \todo{} & \todo{} & \todo{} & \todo{} \\
+\midrule
+C1 & \todo{} & \todo{} & \todo{} & \todo{} \\
+C2 & \todo{} & \todo{} & \todo{} & \todo{} \\
+C3 & \todo{} & \todo{} & \todo{} & \todo{} \\
+\bottomrule
+\end{tabular}
+\caption{Summary statistics over $n=\todo{}$ runs per scenario.}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.32\linewidth}\centering
+  \fbox{\parbox[c][3cm][c]{0.9\linewidth}{\centering\todo{plot}}}
+  % \includegraphics[width=\linewidth]{figures/state_space.pdf}
+  \caption{State space}
+\end{subfigure}
+\begin{subfigure}{0.32\linewidth}\centering
+  \fbox{\parbox[c][3cm][c]{0.9\linewidth}{\centering\todo{plot}}}
+  % \includegraphics[width=\linewidth]{figures/action_space.pdf}
+  \caption{Action space}
+\end{subfigure}
+\begin{subfigure}{0.32\linewidth}\centering
+  \fbox{\parbox[c][3cm][c]{0.9\linewidth}{\centering\todo{plot}}}
+  % \includegraphics[width=\linewidth]{figures/clutter.pdf}
+  \caption{Clutter}
+\end{subfigure}
+\caption{Mean discounted reward with 95\% CI error bars as each factor increases.}
+\end{figure}
+
+\subsubsection*{Discussion}
+\paragraph{Effect of state-space size.} \todo{}
+\paragraph{Effect of action-space size.} \todo{}
+\paragraph{Effect of clutter.} \todo{}
+\paragraph{Which factor degrades performance the most?} \todo{Answer, supported by the statistics (overlapping vs non-overlapping CIs, normalised degradation, etc.).}
+\paragraph{Role of each solver component as complexity grows.}
+\todo{Selection, expansion, rollout/heuristic, backpropagation, tree reuse: which helped or hurt, and why. Ablation results if run.}
+\paragraph{Limitations and possible improvements.} \todo{}
+
+% =====================================================================
+\appendix
+\section*{Appendix A: Generative AI disclosure}
+% Required by the assignment: failure to disclose = cheating.
+Tools used: \todo{tool names and versions, or ``None''}.
+
+\noindent What they were used for: \todo{}
+
+\noindent Full list of prompts:
+\begin{enumerate}[label=\arabic*.]
+  \item \todo{prompt 1 (verbatim)}
+  \item \todo{prompt 2 (verbatim)}
+\end{enumerate}
+
+\section*{Appendix B: Additional results}
+\todo{Optional: per-scenario raw tables, extra plots, ablations.}
+
+% \section*{References}
+% \begin{thebibliography}{9}
+%   \bibitem{kocsis2006} L.~Kocsis and C.~Szepesv\'ari, ``Bandit based Monte-Carlo planning,'' ECML 2006.
+% \end{thebibliography}
+
+\end{document}
