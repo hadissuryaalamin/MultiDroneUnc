@@ -12,10 +12,14 @@ class Node:
 
 
 class Planner:
-    def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: int = 1.0):
+    def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: int = 1.0,
+                 max_depth: int | None = None):
         self._env = env
         # The runner passes an environment that has already loaded the YAML config.
         self._config = env.get_config()
+        if max_depth is not None and max_depth < 1:
+            raise ValueError("max_depth must be positive")
+        self._max_depth = self._config.max_num_steps if max_depth is None else max_depth
         self._rng = np.random.default_rng(self._config.seed)
         self._a_param = a_param
         self._b_param = b_param
@@ -39,7 +43,7 @@ class Planner:
         deadline = perf_counter() + planning_time_per_step
         root = Node(current_state, self._env.num_actions)
         gamma = self._config.discount_factor
-        max_depth = self._config.max_num_steps
+        max_depth = self._max_depth
 
         while perf_counter() < deadline:
             node = root
@@ -82,8 +86,10 @@ class Planner:
         tried = root.N > 0
         if not tried.any():
             return 0  # No simulations completed within the time budget.
-        scores = np.where(tried, root.Q, -np.inf)
-        best_action = int(np.argmax(scores))
+        best_q = np.max(root.Q[tried])
+        best_actions = np.flatnonzero(tried & (root.Q == best_q))
+        # Break equal-Q ties randomly instead of favoring the lowest action ID.
+        best_action = int(self._rng.choice(best_actions))
         return best_action
 
     def _rollout(self, state: np.ndarray, depth: int, deadline: float) -> float:
