@@ -9,17 +9,16 @@ class Node:
         self.N = np.zeros(num_actions)
         self.Q = np.zeros(num_actions)
         self.children = {}  # (action, next_state.tobytes()) -> Node
+        self.invalid_actions = np.zeros(num_actions, dtype=bool)
+        self.fallback_action = None
+        self.has_safe_action = False
 
 
 class Planner:
-    def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: int = 1.0,
-                 max_depth: int | None = None):
+    def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: int = 1.0):
         self._env = env
         # The runner passes an environment that has already loaded the YAML config.
         self._config = env.get_config()
-        if max_depth is not None and max_depth < 1:
-            raise ValueError("max_depth must be positive")
-        self._max_depth = self._config.max_num_steps if max_depth is None else max_depth
         self._rng = np.random.default_rng(self._config.seed)
         self._a_param = a_param
         self._b_param = b_param
@@ -43,7 +42,7 @@ class Planner:
         deadline = perf_counter() + planning_time_per_step
         root = Node(current_state, self._env.num_actions)
         gamma = self._config.discount_factor
-        max_depth = self._max_depth
+        max_depth = self._config.max_num_steps
 
         while perf_counter() < deadline:
             node = root
@@ -53,7 +52,9 @@ class Planner:
 
             while depth < max_depth and perf_counter() < deadline:
                 # 1. Selection: sample a fresh outcome for the selected action.
-                action = self._selection(node)
+                action = self._selection(node, deadline)
+                if perf_counter() >= deadline:
+                    break
                 next_state, reward, done, info = self._env.simulate(node.state, action)
                 path.append((node, action, reward))
                 depth += 1
@@ -85,7 +86,10 @@ class Planner:
 
         tried = root.N > 0
         if not tried.any():
-            return 0  # No simulations completed within the time budget.
+            # Still choose a checked action if the search budget was too short.
+            if root.fallback_action is not None:
+                return root.fallback_action
+            return self._greedy_action(current_state)
         best_q = np.max(root.Q[tried])
         best_actions = np.flatnonzero(tried & (root.Q == best_q))
         # Break equal-Q ties randomly instead of favoring the lowest action ID.
@@ -110,13 +114,38 @@ class Planner:
 
         return reward_sum
 
-    def _greedy_action(self, state: np.ndarray) -> int:
-        """Choose each drone's closest free neighbor to its goal, then encode."""
-        joint_action = 0
+    def _is_safe_action(self, state: np.ndarray, action: int) -> bool:
+        """Check intended endpoints; actual stochastic moves may still collide."""
         num_actions = len(self._action_vectors)
+        occupied = set()
+
+        for drone_state in state:
+            action_id = action % num_actions
+            action //= num_actions
+            position = drone_state[:3]
+            if drone_state[3]:
+                target = position  # Reached drones stay solid at their goals.
+            else:
+                target = position + self._action_vectors[action_id]
+
+            if np.any(target < 0) or np.any(target >= self._grid_size):
+                return False
+            cell = tuple(target)
+            if self._obstacles[cell] or cell in occupied:
+                return False
+            occupied.add(cell)
+
+        return True
+
+    def _greedy_action(self, state: np.ndarray) -> int:
+        """Try nearby goal-directed moves while keeping intended endpoints distinct."""
+        num_actions = len(self._action_vectors)
+        choices = []
+        fallback_action = 0
 
         for i, drone_state in enumerate(state):
-            if drone_state[3]:  # Simulator locks drones that reached their goal.
+            if drone_state[3]:
+                choices.append([(0, tuple(drone_state[:3]))])
                 continue
 
             position = drone_state[:3]
@@ -131,26 +160,77 @@ class Planner:
             )
             action_ids = np.flatnonzero(in_bounds)
 
-            # Avoid obstacles if a free neighbor exists. There is no stay action.
+            # Keep a fallback for states with no collision-free joint action.
+            if not action_ids.size:
+                choices.append([])
+                continue
             cells = candidates[action_ids]
             free = ~self._obstacles[cells[:, 0], cells[:, 1], cells[:, 2]]
+            free_action_ids = action_ids[free]
             if free.any():
-                action_ids = action_ids[free]
+                action_ids = free_action_ids
 
-            # Choose the candidate with the smallest Euclidean distance to goal.
+            # Try the closest candidate first, then the next closest if needed.
             distances = np.linalg.norm(candidates[action_ids] - goal, axis=1)
-            best_action = int(action_ids[np.argmin(distances)])
+            order = np.argsort(distances, kind='stable')
+            ordered_actions = action_ids[order]
+            fallback_action += int(ordered_actions[0]) * (num_actions ** i)
+            drone_choices = []
+            if free_action_ids.size:
+                for action_id in ordered_actions:
+                    cell = tuple(candidates[action_id])
+                    drone_choices.append((int(action_id), cell))
+            choices.append(drone_choices)
 
-            # Encode this drone's choice in the joint action.
-            joint_action += best_action * (num_actions ** i)
+        occupied = set()
 
+        def assign(drone_index):
+            if drone_index == len(state):
+                return 0
+
+            for action_id, cell in choices[drone_index]:
+                if cell in occupied:
+                    continue
+                occupied.add(cell)
+                remaining_action = assign(drone_index + 1)
+                occupied.remove(cell)
+                if remaining_action is not None:
+                    return action_id * (num_actions ** drone_index) + remaining_action
+
+            return None
+
+        joint_action = assign(0)
+        if joint_action is None:
+            # No stay action exists; some states have no safe intended move.
+            return fallback_action
         return joint_action
 
+    def _selection(self, node: Node, deadline: float = float('inf')) -> int:
+        """Select a checked untried action, or use UCB among tried actions."""
+        if node.fallback_action is None:
+            node.fallback_action = self._greedy_action(node.state)
+            node.has_safe_action = self._is_safe_action(node.state, node.fallback_action)
 
-    def _selection(self, node: Node) -> int:
-        """Select the action with the highest UCB value."""
-        untried = np.flatnonzero(node.N == 0)
+        if not node.has_safe_action:
+            return node.fallback_action
+
+        untried = np.flatnonzero((node.N == 0) & ~node.invalid_actions)
         if untried.size:
-            return int(self._rng.choice(untried))
-        ucb = node.Q + np.sqrt(2 * np.log(node.N.sum()) / node.N)
-        return int(np.argmax(ucb))
+            # Bound rejection sampling so filtering cannot consume the whole budget.
+            for _ in range(min(64, len(untried))):
+                if perf_counter() >= deadline:
+                    return node.fallback_action
+                index = int(self._rng.integers(len(untried)))
+                action = int(untried[index])
+                if self._is_safe_action(node.state, action):
+                    return action
+                node.invalid_actions[action] = True
+                untried[index] = untried[-1]
+                untried = untried[:-1]
+            return node.fallback_action
+
+        tried = np.flatnonzero((node.N > 0) & ~node.invalid_actions)
+        if not tried.size:
+            return node.fallback_action
+        ucb = node.Q[tried] + np.sqrt(2 * np.log(node.N[tried].sum()) / node.N[tried])
+        return int(tried[np.argmax(ucb)])
