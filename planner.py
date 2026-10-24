@@ -89,7 +89,8 @@ class Planner:
             # Still choose a checked action if the search budget was too short.
             if root.fallback_action is not None:
                 return root.fallback_action
-            return self._greedy_action(current_state)
+            fallback_action, _ = self._greedy_action(current_state)
+            return fallback_action
         best_q = np.max(root.Q[tried])
         best_actions = np.flatnonzero(tried & (root.Q == best_q))
         # Break equal-Q ties randomly instead of favoring the lowest action ID.
@@ -105,7 +106,7 @@ class Planner:
         for _ in range(depth):
             if perf_counter() >= deadline:
                 break
-            sim_action = self._greedy_action(sim_state)
+            sim_action, _ = self._greedy_action(sim_state)
             sim_state, reward, done, info = self._env.simulate(sim_state, sim_action)
             reward_sum += discount * reward
             discount *= self._config.discount_factor
@@ -137,79 +138,70 @@ class Planner:
 
         return True
 
-    def _greedy_action(self, state: np.ndarray) -> int:
-        """Try nearby goal-directed moves while keeping intended endpoints distinct."""
+    def _greedy_action(self, state: np.ndarray) -> tuple[int, bool]:
+        """Return a joint action and whether a safe intended assignment was found."""
         num_actions = len(self._action_vectors)
         choices = []
         fallback_action = 0
 
         for i, drone_state in enumerate(state):
             if drone_state[3]:
-                choices.append([(0, tuple(drone_state[:3]))])
+                choices.append([0])  # Reached drones stay at their goals.
                 continue
 
             position = drone_state[:3]
             goal = self._goals[i]
-
-            # Calculate candidate positions without calling simulate().
             candidates = position + self._action_vectors
 
-            # Keep actions that stay inside the grid.
+            # Retain in-bounds moves even if none avoids obstacles: the fallback
+            # still prefers an in-bounds move when no safe assignment exists.
             in_bounds = np.all(
                 (candidates >= 0) & (candidates < self._grid_size), axis=1
             )
             action_ids = np.flatnonzero(in_bounds)
-
-            # Keep a fallback for states with no collision-free joint action.
             if not action_ids.size:
                 choices.append([])
                 continue
-            cells = candidates[action_ids]
-            free = ~self._obstacles[cells[:, 0], cells[:, 1], cells[:, 2]]
-            free_action_ids = action_ids[free]
-            if free.any():
-                action_ids = free_action_ids
 
-            # Try the closest candidate first, then the next closest if needed.
             distances = np.linalg.norm(candidates[action_ids] - goal, axis=1)
             order = np.argsort(distances, kind='stable')
-            ordered_actions = action_ids[order]
-            fallback_action += int(ordered_actions[0]) * (num_actions ** i)
-            drone_choices = []
-            if free_action_ids.size:
-                for action_id in ordered_actions:
-                    cell = tuple(candidates[action_id])
-                    drone_choices.append((int(action_id), cell))
-            choices.append(drone_choices)
+            ordered_actions = [int(action_id) for action_id in action_ids[order]]
+            choices.append(ordered_actions)
 
-        occupied = set()
+            # Check one drone with the same validator used by Selection.
+            fallback_id = ordered_actions[0]
+            for action_id in ordered_actions:
+                if self._is_safe_action(state[i:i + 1], action_id):
+                    fallback_id = action_id
+                    break
+            fallback_action += fallback_id * (num_actions ** i)
 
-        def assign(drone_index):
+        def assign(drone_index, joint_action):
             if drone_index == len(state):
-                return 0
+                return joint_action
 
-            for action_id, cell in choices[drone_index]:
-                if cell in occupied:
+            for action_id in choices[drone_index]:
+                candidate_action = joint_action + action_id * (num_actions ** drone_index)
+                # Validate the assigned prefix only; later drones have no action
+                # yet. This checks obstacles, bounds and collisions in one place.
+                if not self._is_safe_action(state[:drone_index + 1], candidate_action):
                     continue
-                occupied.add(cell)
-                remaining_action = assign(drone_index + 1)
-                occupied.remove(cell)
-                if remaining_action is not None:
-                    return action_id * (num_actions ** drone_index) + remaining_action
+                result = assign(drone_index + 1, candidate_action)
+                if result is not None:
+                    return result
 
             return None
 
-        joint_action = assign(0)
+        joint_action = assign(0, 0)
         if joint_action is None:
             # No stay action exists; some states have no safe intended move.
-            return fallback_action
-        return joint_action
+            return fallback_action, False
+        return joint_action, True
 
     def _selection(self, node: Node, deadline: float = float('inf')) -> int:
         """Select a checked untried action, or use UCB among tried actions."""
         if node.fallback_action is None:
-            node.fallback_action = self._greedy_action(node.state)
-            node.has_safe_action = self._is_safe_action(node.state, node.fallback_action)
+            node.fallback_action, node.has_safe_action = self._greedy_action(node.state)
 
         if not node.has_safe_action:
             return node.fallback_action
