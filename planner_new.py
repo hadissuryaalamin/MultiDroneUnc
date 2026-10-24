@@ -1,4 +1,4 @@
-"""New planner stages: selection, expansion, greedy rollout, backpropagation."""
+"""MCTS with per-drone UCB selection and greedy rollouts."""
 
 from time import perf_counter
 
@@ -38,6 +38,96 @@ class Planner:
         for cell in self._config.obstacle_cells or []:
             self._obstacles[tuple(cell)] = True
         self._goals = np.asarray(self._config.goal_positions, dtype=float)
+
+    def plan(self, current_state: np.ndarray, planning_time_per_step: float) -> int:
+        """Search within the time budget and return a combined per-drone action.
+
+        The tree is rebuilt from the current observed state on every call.
+        If sequential choice cannot produce a safe intended assignment, raise
+        RuntimeError rather than inventing a stay action or returning a collision.
+        """
+        deadline = perf_counter() + planning_time_per_step
+        if np.all(current_state[:, 3]):
+            return 0  # All per-drone action IDs are ignored at reached goals.
+
+        root = Node(current_state, len(self._action_vectors))
+        max_depth = self._config.max_num_steps
+        fallback_action = None
+
+        while max_depth > 0 and perf_counter() < deadline:
+            node = root
+            path = []
+            depth = 0
+            rollout_return = 0.0
+
+            while depth < max_depth and perf_counter() < deadline:
+                action = self._selection(node)
+                if perf_counter() >= deadline:
+                    break
+                if action is None:
+                    # Evaluate a reached tree node with the greedy policy if
+                    # this selection's earlier choices left no valid candidate.
+                    if path:
+                        rollout_return = self._rollout(
+                            node.state, max_depth - depth, deadline
+                        )
+                    break
+
+                child, reward, done, info, is_new = self._expansion(node, action)
+                path.append((node, action, reward))
+                depth += 1
+                if node is root:
+                    fallback_action = action
+
+                if done:
+                    break
+                if is_new:
+                    rollout_return = self._rollout(
+                        child.state, max_depth - depth, deadline
+                    )
+                    break
+                node = child
+
+            self._backpropagation(path, rollout_return)
+
+        action = self._best_action(root)
+        if action is not None:
+            return action
+        if fallback_action is not None:
+            return fallback_action
+        action = self._greedy_action(current_state)
+        if action is None:
+            raise RuntimeError('Sequential choice could not find a safe intended action.')
+        return action
+
+    def _best_action(self, node: Node) -> int | None:
+        """Combine highest-Q tried actions in order, with random tie breaking."""
+        actions = np.zeros(len(node.state), dtype=np.int32)
+        occupied = {tuple(drone[:3]) for drone in node.state if drone[3]}
+
+        for drone_index, drone_state in enumerate(node.state):
+            if drone_state[3]:
+                continue
+            targets = drone_state[:3] + self._action_vectors
+            in_bounds = np.all(
+                (targets >= 0) & (targets < self._grid_size), axis=1
+            )
+            candidates = np.array(
+                [action for action in np.flatnonzero(in_bounds)
+                 if node.N[drone_index, action] > 0
+                 and not self._obstacles[tuple(targets[action])]
+                 and tuple(targets[action]) not in occupied],
+                dtype=np.intp,
+            )
+            if not candidates.size:
+                return None
+            values = node.Q[drone_index, candidates]
+            ties = candidates[values == np.max(values)]
+            action = int(self._rng.choice(ties))
+            actions[drone_index] = action
+            occupied.add(tuple(targets[action]))
+
+        return self._encode_action(actions)
 
     def _selection(self, node: Node) -> int | None:
         """Choose per-drone UCB actions in order, then encode them together.
