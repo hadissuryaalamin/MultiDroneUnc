@@ -1,4 +1,6 @@
-"""New planner, built step by step. Implements selection and expansion."""
+"""New planner, built step by step: selection, expansion, and greedy rollout."""
+
+from time import perf_counter
 
 import numpy as np
 
@@ -35,6 +37,7 @@ class Planner:
         self._obstacles = np.zeros(self._config.grid_size, dtype=bool)
         for cell in self._config.obstacle_cells or []:
             self._obstacles[tuple(cell)] = True
+        self._goals = np.asarray(self._config.goal_positions, dtype=float)
 
     def _selection(self, node: Node) -> int | None:
         """Choose per-drone UCB actions in order, then encode them together.
@@ -111,6 +114,67 @@ class Planner:
             node.children[key] = child
 
         return child, reward, done, info, is_new
+
+    def _rollout(self, state: np.ndarray, depth: int, deadline: float) -> float:
+        """Estimate return using per-drone greedy moves, without growing the tree."""
+        sim_state = state.copy()
+        reward_sum = 0.0
+        discount = 1.0
+        if np.all(sim_state[:, 3]):
+            return reward_sum
+
+        for _ in range(depth):
+            if perf_counter() >= deadline:
+                break
+            action = self._greedy_action(sim_state)
+            if action is None or perf_counter() >= deadline:
+                # No conflict-free greedy assignment, or no simulation time left.
+                break
+            sim_state, reward, done, info = self._env.simulate(sim_state, action)
+            reward_sum += discount * reward
+            discount *= self._config.discount_factor
+            if done:
+                break
+
+        return reward_sum
+
+    def _greedy_action(self, state: np.ndarray) -> int | None:
+        """Pick each drone's closest valid target, then combine its action.
+
+        Targets use Euclidean distance to that drone's own goal. Drones choose
+        in index order, reserving their targets for later drones. As in selection,
+        earlier choices stay fixed and reached drones remain solid. Return None
+        if the current drone has no valid target left.
+        """
+        actions = np.zeros(len(state), dtype=np.int32)
+        occupied = {tuple(drone[:3]) for drone in state if drone[3]}
+
+        for drone_index, drone_state in enumerate(state):
+            if drone_state[3]:
+                continue
+
+            targets = drone_state[:3] + self._action_vectors
+            in_bounds = np.all(
+                (targets >= 0) & (targets < self._grid_size), axis=1
+            )
+            candidates = np.array(
+                [action for action in np.flatnonzero(in_bounds)
+                 if not self._obstacles[tuple(targets[action])]
+                 and tuple(targets[action]) not in occupied],
+                dtype=np.intp,
+            )
+            if not candidates.size:
+                return None
+
+            distances = np.linalg.norm(
+                targets[candidates] - self._goals[drone_index], axis=1
+            )
+            # Equal distances keep the simulator's action order.
+            action = int(candidates[np.argmin(distances)])
+            actions[drone_index] = action
+            occupied.add(tuple(targets[action]))
+
+        return self._encode_action(actions)
 
     def _encode_action(self, actions: np.ndarray) -> int:
         """Encode drone 0 as the least significant base-A digit."""
