@@ -1,113 +1,226 @@
+"""MCTS with per-drone UCB selection and greedy rollouts."""
+
 from time import perf_counter
 
 import numpy as np
+
 from multi_drone import MultiDroneUnc
 
+
 class Node:
-    def __init__(self, state: np.ndarray, num_actions: int):
+    def __init__(self, state: np.ndarray, num_actions_per_drone: int):
         self.state = state.copy()
-        self.N = np.zeros(num_actions)
-        self.Q = np.zeros(num_actions)
-        self.children = {}  # (action, next_state.tobytes()) -> Node
-        self.invalid_actions = np.zeros(num_actions, dtype=bool)
-        self.fallback_action = None
-        self.has_safe_action = False
+        # Each drone has its own action statistics, not a joint-action table.
+        shape = (len(state), num_actions_per_drone)
+        self.N = np.zeros(shape, dtype=np.int64)
+        self.Q = np.zeros(shape, dtype=float)
+        self.children: dict[tuple[int, bytes], Node] = {}
 
 
 class Planner:
-    def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: int = 1.0):
+    def __init__(self, env: MultiDroneUnc):
         self._env = env
-        # The runner passes an environment that has already loaded the YAML config.
         self._config = env.get_config()
         self._rng = np.random.default_rng(self._config.seed)
-        self._a_param = a_param
-        self._b_param = b_param
-        # Match the simulator's per-drone action order for joint-action encoding.
-        dz_values = (-1, 0, 1) if self._config.change_altitude else (0,)
-        vectors = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for dz in dz_values:
-                    if (dx, dy, dz) != (0, 0, 0):
-                        vectors.append([dx, dy, dz])
 
-        self._action_vectors = np.array(vectors, dtype=np.int32)
-        self._goals = np.asarray(self._config.goal_positions, dtype=float)
+        # Keep the same per-drone action order as the simulator.
+        dz_values = (-1, 0, 1) if self._config.change_altitude else (0,)
+        self._action_vectors = np.array(
+            [[dx, dy, dz]
+             for dx in (-1, 0, 1)
+             for dy in (-1, 0, 1)
+             for dz in dz_values
+             if (dx, dy, dz) != (0, 0, 0)],
+            dtype=np.int32,
+        )
         self._grid_size = np.asarray(self._config.grid_size)
         self._obstacles = np.zeros(self._config.grid_size, dtype=bool)
         for cell in self._config.obstacle_cells or []:
             self._obstacles[tuple(cell)] = True
+        self._goals = np.asarray(self._config.goal_positions, dtype=float)
 
     def plan(self, current_state: np.ndarray, planning_time_per_step: float) -> int:
-        deadline = perf_counter() + planning_time_per_step
-        root = Node(current_state, self._env.num_actions)
-        gamma = self._config.discount_factor
-        max_depth = self._config.max_num_steps
+        """Search within the time budget and return a combined per-drone action.
 
-        while perf_counter() < deadline:
+        The tree is rebuilt from the current observed state on every call.
+        If sequential choice cannot produce a safe intended assignment, raise
+        RuntimeError rather than inventing a stay action or returning a collision.
+        """
+        deadline = perf_counter() + planning_time_per_step
+        if np.all(current_state[:, 3]):
+            return 0  # All per-drone action IDs are ignored at reached goals.
+
+        root = Node(current_state, len(self._action_vectors))
+        max_depth = self._config.max_num_steps
+        fallback_action = None
+
+        while max_depth > 0 and perf_counter() < deadline:
             node = root
             path = []
             depth = 0
-            reward_sum = 0.0
+            rollout_return = 0.0
 
             while depth < max_depth and perf_counter() < deadline:
-                # 1. Selection: sample a fresh outcome for the selected action.
-                action = self._selection(node, deadline)
+                action = self._selection(node)
                 if perf_counter() >= deadline:
                     break
-                next_state, reward, done, info = self._env.simulate(node.state, action)
+                if action is None:
+                    # Evaluate a reached tree node with the greedy policy if
+                    # this selection's earlier choices left no valid candidate.
+                    if path:
+                        rollout_return = self._rollout(
+                            node.state, max_depth - depth, deadline
+                        )
+                    break
+
+                child, reward, done, info, is_new = self._expansion(node, action)
                 path.append((node, action, reward))
                 depth += 1
-
-                # 2. Expansion: preserve each distinct outcome of this action.
-                key = (action, next_state.tobytes())
-                child = node.children.get(key)
-                is_new = child is None
-                if is_new:
-                    child = Node(next_state, self._env.num_actions)
-                    node.children[key] = child
+                if node is root:
+                    fallback_action = action
 
                 if done:
                     break
-
                 if is_new:
-                    # 3. Rollout from the new child, within the remaining depth.
-                    reward_sum = self._rollout(child.state, max_depth - depth, deadline)
+                    rollout_return = self._rollout(
+                        child.state, max_depth - depth, deadline
+                    )
                     break
-
-                # The outcome already exists: continue selection from its node.
                 node = child
 
-            # 4. Backpropagation: update every selected action along the path.
-            for node, action, reward in reversed(path):
-                reward_sum = reward + gamma * reward_sum
-                node.N[action] += 1
-                node.Q[action] += (reward_sum - node.Q[action]) / node.N[action]
+            self._backpropagation(path, rollout_return)
 
-        tried = root.N > 0
-        if not tried.any():
-            # Still choose a checked action if the search budget was too short.
-            if root.fallback_action is not None:
-                return root.fallback_action
-            fallback_action, _ = self._greedy_action(current_state)
+        action = self._best_action(root)
+        if action is not None:
+            return action
+        if fallback_action is not None:
             return fallback_action
-        best_q = np.max(root.Q[tried])
-        best_actions = np.flatnonzero(tried & (root.Q == best_q))
-        # Break equal-Q ties randomly instead of favoring the lowest action ID.
-        best_action = int(self._rng.choice(best_actions))
-        return best_action
+        action = self._greedy_action(current_state)
+        if action is None:
+            raise RuntimeError('Sequential choice could not find a safe intended action.')
+        return action
+
+    def _best_action(self, node: Node) -> int | None:
+        """Combine highest-Q tried actions in order, with random tie breaking."""
+        actions = np.zeros(len(node.state), dtype=np.int32)
+        occupied = {tuple(drone[:3]) for drone in node.state if drone[3]}
+
+        for drone_index, drone_state in enumerate(node.state):
+            if drone_state[3]:
+                continue
+            targets = drone_state[:3] + self._action_vectors
+            in_bounds = np.all(
+                (targets >= 0) & (targets < self._grid_size), axis=1
+            )
+            candidates = np.array(
+                [action for action in np.flatnonzero(in_bounds)
+                 if node.N[drone_index, action] > 0
+                 and not self._obstacles[tuple(targets[action])]
+                 and tuple(targets[action]) not in occupied],
+                dtype=np.intp,
+            )
+            if not candidates.size:
+                return None
+            values = node.Q[drone_index, candidates]
+            ties = candidates[values == np.max(values)]
+            action = int(self._rng.choice(ties))
+            actions[drone_index] = action
+            occupied.add(tuple(targets[action]))
+
+        return self._encode_action(actions)
+
+    def _selection(self, node: Node) -> int | None:
+        """Choose per-drone UCB actions in order, then encode them together.
+
+        Conflicts concern intended target cells, before stochastic movement.
+        Earlier choices stay fixed; only the current drone tries another action.
+        Return None if it runs out of valid candidates. Statistics are updated
+        later by backpropagation, never by selection itself.
+        """
+        actions = np.zeros(len(node.state), dtype=np.int32)
+        # Reached drones remain solid, including those later in selection order.
+        occupied = {tuple(drone[:3]) for drone in node.state if drone[3]}
+
+        for drone_index, drone_state in enumerate(node.state):
+            if drone_state[3]:
+                # Any action ID is ignored by the simulator for a reached drone.
+                continue
+
+            visits = node.N[drone_index]
+            tried = visits > 0
+            ucb = np.full(len(self._action_vectors), np.inf)
+            total_visits = max(1, int(visits.sum()))
+            ucb[tried] = node.Q[drone_index, tried] + np.sqrt(
+                2 * np.log(total_visits) / visits[tried]
+            )
+
+            targets = drone_state[:3] + self._action_vectors
+            in_bounds = np.all(
+                (targets >= 0) & (targets < self._grid_size), axis=1
+            )
+            candidates = np.flatnonzero(in_bounds)
+            targets_in_bounds = targets[candidates]
+            candidates = candidates[
+                ~self._obstacles[tuple(targets_in_bounds.T)]
+            ]
+
+            while candidates.size:
+                best_ucb = np.max(ucb[candidates])
+                ties = candidates[ucb[candidates] == best_ucb]
+                action = int(self._rng.choice(ties))
+                target = tuple(targets[action])
+                if target in occupied:
+                    # Reject only for this selection, not permanently.
+                    candidates = candidates[candidates != action]
+                    continue
+                actions[drone_index] = action
+                occupied.add(target)
+                break
+            else:
+                return None
+
+        return self._encode_action(actions)
+
+    def _expansion(
+        self, node: Node, action: int
+    ) -> tuple[Node, float, bool, dict, bool]:
+        """Sample a transition and find or create its child.
+
+        Returns (child, reward, done, info, is_new). Every call samples a fresh
+        outcome, even for an existing action. New nonterminal children can be
+        evaluated by rollout; existing nonterminal children can be traversed.
+        Terminal outcomes stop the search path. The search loop will handle
+        those decisions in a later step.
+        """
+        if action is None:
+            raise ValueError('Expansion requires a successfully selected action.')
+
+        next_state, reward, done, info = self._env.simulate(node.state, action)
+        key = (action, next_state.tobytes())
+        child = node.children.get(key)
+        is_new = child is None
+        if is_new:
+            child = Node(next_state, len(self._action_vectors))
+            node.children[key] = child
+
+        return child, reward, done, info, is_new
 
     def _rollout(self, state: np.ndarray, depth: int, deadline: float) -> float:
-        """Estimate a state's value with a distance-greedy rollout policy."""
+        """Estimate return using per-drone greedy moves, without growing the tree."""
         sim_state = state.copy()
         reward_sum = 0.0
         discount = 1.0
+        if np.all(sim_state[:, 3]):
+            return reward_sum
 
         for _ in range(depth):
             if perf_counter() >= deadline:
                 break
-            sim_action, _ = self._greedy_action(sim_state)
-            sim_state, reward, done, info = self._env.simulate(sim_state, sim_action)
+            action = self._greedy_action(sim_state)
+            if action is None or perf_counter() >= deadline:
+                # No conflict-free greedy assignment, or no simulation time left.
+                break
+            sim_state, reward, done, info = self._env.simulate(sim_state, action)
             reward_sum += discount * reward
             discount *= self._config.discount_factor
             if done:
@@ -115,114 +228,79 @@ class Planner:
 
         return reward_sum
 
-    def _is_safe_action(self, state: np.ndarray, action: int) -> bool:
-        """Check intended endpoints; actual stochastic moves may still collide."""
+    def _backpropagation(
+        self,
+        path: list[tuple[Node, int, float]],
+        rollout_return: float = 0.0,
+    ) -> None:
+        """Update selected per-drone actions with discounted team returns.
+
+        Each path entry is (node, encoded_action, immediate_reward), ordered
+        from the root forward. Pass the rollout return as the continuation
+        value, or zero when the path ended at a terminal transition.
+        Drones already reached in a node's state receive no action update.
+        """
+        return_sum = rollout_return
+        gamma = self._config.discount_factor
         num_actions = len(self._action_vectors)
-        occupied = set()
 
-        for drone_state in state:
-            action_id = action % num_actions
-            action //= num_actions
-            position = drone_state[:3]
-            if drone_state[3]:
-                target = position  # Reached drones stay solid at their goals.
-            else:
-                target = position + self._action_vectors[action_id]
-
-            if np.any(target < 0) or np.any(target >= self._grid_size):
-                return False
-            cell = tuple(target)
-            if self._obstacles[cell] or cell in occupied:
-                return False
-            occupied.add(cell)
-
-        return True
-
-    def _greedy_action(self, state: np.ndarray) -> tuple[int, bool]:
-        """Return a joint action and whether a safe intended assignment was found."""
-        num_actions = len(self._action_vectors)
-        choices = []
-        fallback_action = 0
-
-        for i, drone_state in enumerate(state):
-            if drone_state[3]:
-                choices.append([0])  # Reached drones stay at their goals.
-                continue
-
-            position = drone_state[:3]
-            goal = self._goals[i]
-            candidates = position + self._action_vectors
-
-            # Retain in-bounds moves even if none avoids obstacles: the fallback
-            # still prefers an in-bounds move when no safe assignment exists.
-            in_bounds = np.all(
-                (candidates >= 0) & (candidates < self._grid_size), axis=1
-            )
-            action_ids = np.flatnonzero(in_bounds)
-            if not action_ids.size:
-                choices.append([])
-                continue
-
-            distances = np.linalg.norm(candidates[action_ids] - goal, axis=1)
-            order = np.argsort(distances, kind='stable')
-            ordered_actions = [int(action_id) for action_id in action_ids[order]]
-            choices.append(ordered_actions)
-
-            # Check one drone with the same validator used by Selection.
-            fallback_id = ordered_actions[0]
-            for action_id in ordered_actions:
-                if self._is_safe_action(state[i:i + 1], action_id):
-                    fallback_id = action_id
-                    break
-            fallback_action += fallback_id * (num_actions ** i)
-
-        def assign(drone_index, joint_action):
-            if drone_index == len(state):
-                return joint_action
-
-            for action_id in choices[drone_index]:
-                candidate_action = joint_action + action_id * (num_actions ** drone_index)
-                # Validate the assigned prefix only; later drones have no action
-                # yet. This checks obstacles, bounds and collisions in one place.
-                if not self._is_safe_action(state[:drone_index + 1], candidate_action):
+        for node, joint_action, reward in reversed(path):
+            return_sum = reward + gamma * return_sum
+            for drone_index, drone_state in enumerate(node.state):
+                action = joint_action % num_actions
+                joint_action //= num_actions
+                if drone_state[3]:
                     continue
-                result = assign(drone_index + 1, candidate_action)
-                if result is not None:
-                    return result
 
-            return None
+                node.N[drone_index, action] += 1
+                node.Q[drone_index, action] += (
+                    return_sum - node.Q[drone_index, action]
+                ) / node.N[drone_index, action]
 
-        joint_action = assign(0, 0)
-        if joint_action is None:
-            # No stay action exists; some states have no safe intended move.
-            return fallback_action, False
-        return joint_action, True
+    def _greedy_action(self, state: np.ndarray) -> int | None:
+        """Pick each drone's closest valid target, then combine its action.
 
-    def _selection(self, node: Node, deadline: float = float('inf')) -> int:
-        """Select a checked untried action, or use UCB among tried actions."""
-        if node.fallback_action is None:
-            node.fallback_action, node.has_safe_action = self._greedy_action(node.state)
+        Targets use Euclidean distance to that drone's own goal. Drones choose
+        in index order, reserving their targets for later drones. As in selection,
+        earlier choices stay fixed and reached drones remain solid. Return None
+        if the current drone has no valid target left.
+        """
+        actions = np.zeros(len(state), dtype=np.int32)
+        occupied = {tuple(drone[:3]) for drone in state if drone[3]}
 
-        if not node.has_safe_action:
-            return node.fallback_action
+        for drone_index, drone_state in enumerate(state):
+            if drone_state[3]:
+                continue
 
-        untried = np.flatnonzero((node.N == 0) & ~node.invalid_actions)
-        if untried.size:
-            # Bound rejection sampling so filtering cannot consume the whole budget.
-            for _ in range(min(64, len(untried))):
-                if perf_counter() >= deadline:
-                    return node.fallback_action
-                index = int(self._rng.integers(len(untried)))
-                action = int(untried[index])
-                if self._is_safe_action(node.state, action):
-                    return action
-                node.invalid_actions[action] = True
-                untried[index] = untried[-1]
-                untried = untried[:-1]
-            return node.fallback_action
+            targets = drone_state[:3] + self._action_vectors
+            in_bounds = np.all(
+                (targets >= 0) & (targets < self._grid_size), axis=1
+            )
+            candidates = np.array(
+                [action for action in np.flatnonzero(in_bounds)
+                 if not self._obstacles[tuple(targets[action])]
+                 and tuple(targets[action]) not in occupied],
+                dtype=np.intp,
+            )
+            if not candidates.size:
+                return None
 
-        tried = np.flatnonzero((node.N > 0) & ~node.invalid_actions)
-        if not tried.size:
-            return node.fallback_action
-        ucb = node.Q[tried] + np.sqrt(2 * np.log(node.N[tried].sum()) / node.N[tried])
-        return int(tried[np.argmax(ucb)])
+            distances = np.linalg.norm(
+                targets[candidates] - self._goals[drone_index], axis=1
+            )
+            # Equal distances keep the simulator's action order.
+            action = int(candidates[np.argmin(distances)])
+            actions[drone_index] = action
+            occupied.add(tuple(targets[action]))
+
+        return self._encode_action(actions)
+
+    def _encode_action(self, actions: np.ndarray) -> int:
+        """Encode drone 0 as the least significant base-A digit."""
+        num_actions = len(self._action_vectors)
+        joint_action = 0
+        base = 1
+        for action in actions:
+            joint_action += int(action) * base
+            base *= num_actions
+        return joint_action
