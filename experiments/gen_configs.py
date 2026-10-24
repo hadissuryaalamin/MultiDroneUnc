@@ -1,4 +1,4 @@
-"""Generate the full-factorial complexity configs into experiments/configs.
+"""Generate full-factorial configs into experiments/configs/complexity.
 
 Factors:
     state space : small (5x5x3), medium (10x10x5), large (20x20x10)
@@ -11,14 +11,15 @@ layout blocks both the 8-action and the 26-action drones; flying over an
 obstacle is never a shortcut. Clutter layouts use a fixed seed per grid size,
 so the 8- and 26-action configs of the same size share identical obstacles.
 """
+import argparse
 import itertools
-import os
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import yaml
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), "configs")
+OUT_DIR = Path(__file__).resolve().parent / 'configs' / 'complexity'
 
 GRIDS = {
     "small": (5, 5, 3),
@@ -110,7 +111,11 @@ def to_cells(blocked_xy, Z):
 
 
 def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, default=OUT_DIR,
+                        help='Directory for the 36 generated YAML configs')
+    args = parser.parse_args()
+    args.output.mkdir(parents=True, exist_ok=True)
 
     footprints = {}
     for size, grid in GRIDS.items():
@@ -132,10 +137,10 @@ def main():
             **BASE,
         )
         fname = f"S{size}_A{n_act}_O{obs}_n{n}.yaml"
-        with open(os.path.join(OUT_DIR, fname), "w") as f:
+        with (args.output / fname).open('w', encoding='utf-8') as f:
             yaml.safe_dump(cfg, f, default_flow_style=None, sort_keys=False)
         count += 1
-    print(f"wrote {count} configs to {OUT_DIR}")
+    print(f"wrote {count} configs to {args.output}")
 
 
 if __name__ == "__main__":

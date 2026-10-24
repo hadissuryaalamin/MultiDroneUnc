@@ -1,4 +1,6 @@
-"""Run every config in experiments/configs for N headless episodes and summarise.
+"""Run a config collection for N headless episodes and summarise.
+
+Defaults to experiments/configs/complexity. Select configs/Mukhit with --configs.
 
 Each config gets its own folder with config, per-run CSV and trajectories.
 The top-level folder holds all_runs.csv and summary_by_environment.csv with
@@ -31,7 +33,6 @@ sys.path.insert(0, str(ROOT))
 
 from multi_drone import MultiDroneUnc  # noqa: E402
 from planner import Planner  # noqa: E402
-from run_u8050066 import run  # noqa: E402
 
 NAME_RE = re.compile(r'S(?P<state>\w+?)_A(?P<actions>\d+)_O(?P<obstacles>\w+?)_n(?P<drones>\d+)$')
 RUN_FIELDS = ['environment', 'state', 'actions', 'obstacles', 'drones', 'run', 'seed',
@@ -70,9 +71,19 @@ def run_episode(config_path, seed, planning_time):
     env = HeadlessEnv(str(config_path))
     env.cfg.seed = seed
     env.rng = np.random.default_rng(seed)
-    planner = Planner(env, a_param=1.0, b_param=2)
+    planner = Planner(env)
     started = perf_counter()
-    reward, history = run(env, planner, planning_time_per_step=planning_time)
+    current_state = env.reset()
+    reward = 0.0
+    history = []
+    for step in range(env.cfg.max_num_steps):
+        action = planner.plan(current_state, planning_time)
+        next_state, step_reward, done, info = env.step(action)
+        reward += env.cfg.discount_factor ** step * step_reward
+        history.append((current_state, action, step_reward, next_state, done, info))
+        current_state = next_state
+        if done:
+            break
     seconds = perf_counter() - started
 
     final_info = history[-1][5]
@@ -96,6 +107,7 @@ def run_episode(config_path, seed, planning_time):
 
     row = {
         'seed': seed, 'success': success, 'discounted_reward': float(reward),
+        'drones': env.N, 'actions': 26 if env.cfg.change_altitude else 8,
         'steps': len(history), 'drones_reached': reached,
         'reached_fraction': reached / env.N,
         'obstacle_collisions': obstacle_collisions,
@@ -165,7 +177,8 @@ def summarise(name, rows):
     n = len(rows)
     successes = sum(as_bool(r['success']) for r in rows)
     lo, hi = wilson_ci(successes, n)
-    out = {'environment': name, **factors(name), 'runs': n,
+    factor_values = {key: rows[0].get(key, '') for key in factors(name)}
+    out = {'environment': name, **factor_values, 'runs': n,
            'success_rate': successes / n, 'success_ci_low': lo, 'success_ci_high': hi,
            'collision_episodes': sum(r['termination'] == 'collision' for r in rows),
            'max_steps_episodes': sum(r['termination'] == 'max_steps' for r in rows)}
@@ -178,7 +191,8 @@ def summarise(name, rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--configs', type=Path, default=ROOT / 'experiments' / 'configs')
+    parser.add_argument('--configs', type=Path,
+                        default=ROOT / 'experiments' / 'configs' / 'complexity')
     parser.add_argument('--runs', type=int, default=10)
     parser.add_argument('--seed-start', type=int, default=0)
     parser.add_argument('--planning-time', type=float, default=8.0)
@@ -186,23 +200,49 @@ def main():
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
 
-    configs = sorted(args.configs.glob('*.yaml'))
-    stamp = datetime.now(timezone.utc).strftime('%Y%m%d')
-    out_dir = args.output or ROOT / 'experiments' / 'results' / f'complexity_{args.runs}runs_{stamp}'
+    if args.runs < 1 or args.workers < 1 or args.seed_start < 0:
+        parser.error('runs and workers must be positive; seed-start must be nonnegative')
+    if not np.isfinite(args.planning_time) or args.planning_time <= 0:
+        parser.error('planning-time must be finite and positive')
+    if not args.configs.is_dir():
+        parser.error(f'config directory does not exist: {args.configs}')
+    configs = sorted(path for path in args.configs.iterdir()
+                     if path.is_file() and path.suffix.lower() in {'.yaml', '.yml'})
+    if not configs:
+        parser.error(f'no YAML configs found in {args.configs}; choose configs/complexity or configs/Mukhit')
+    if len({config.stem for config in configs}) != len(configs):
+        parser.error('config filenames must have unique stems')
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    out_dir = args.output or ROOT / 'experiments' / 'results' / f'{args.configs.name}_{args.runs}runs_{stamp}'
     out_dir.mkdir(parents=True, exist_ok=True)
 
     planner_bytes = (ROOT / 'planner.py').read_bytes()
-    (out_dir / 'planner.py').write_bytes(planner_bytes)
-    (out_dir / 'metadata.json').write_text(json.dumps({
+    metadata = {
         'started_at_utc': datetime.now(timezone.utc).isoformat(),
         'configs': [c.name for c in configs],
+        'config_sha256': {c.name: hashlib.sha256(c.read_bytes()).hexdigest() for c in configs},
         'runs_per_config': args.runs,
         'seeds': list(range(args.seed_start, args.seed_start + args.runs)),
         'planning_time_per_step': args.planning_time,
-        'planner_params': {'a_param': 1.0, 'b_param': 2},
+        'planner_params': {},
         'workers': args.workers,
         'planner_sha256': hashlib.sha256(planner_bytes).hexdigest(),
-    }, indent=2), encoding='utf-8')
+    }
+    metadata_path = out_dir / 'metadata.json'
+    if metadata_path.exists():
+        previous = json.loads(metadata_path.read_text(encoding='utf-8'))
+        for field in ('configs', 'config_sha256', 'runs_per_config', 'seeds',
+                      'planning_time_per_step', 'planner_params', 'planner_sha256'):
+            if previous.get(field) != metadata[field]:
+                parser.error(f'output contains a different experiment ({field}); use a new --output folder')
+        snapshot = out_dir / 'planner.py'
+        if not snapshot.exists() or snapshot.read_bytes() != planner_bytes:
+            parser.error('output planner snapshot does not match; use a new --output folder')
+    else:
+        if any(out_dir.iterdir()):
+            parser.error('output is not an empty experiment folder; use a new --output folder')
+        (out_dir / 'planner.py').write_bytes(planner_bytes)
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     print(f'Results: {out_dir} ({len(configs)} configs x {args.runs} runs)', flush=True)
 
     results = {}

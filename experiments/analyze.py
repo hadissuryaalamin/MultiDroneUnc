@@ -4,8 +4,8 @@ Usage: python experiments/analyze.py experiments/results/complexity_10runs_20261
 Writes figures to report/figures/ and table rows to <results>/b4_tables.tex.
 """
 
+import argparse
 import csv
-import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -133,9 +133,26 @@ def plot_marginals(rows, out_dir):
 
 
 def main():
-    results = Path(sys.argv[1])
-    rows = list(csv.DictReader((results / 'all_runs.csv').open(encoding='utf-8')))
-    fig_dir = ROOT / 'report' / 'figures'
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('results', type=Path, help='Full-factorial run_all.py results folder')
+    parser.add_argument('--figures-dir', type=Path, default=ROOT / 'report' / 'figures',
+                        help='Output directory for figures')
+    args = parser.parse_args()
+    results = args.results
+    runs_csv = results / 'all_runs.csv'
+    if not runs_csv.is_file():
+        parser.error(f'missing results CSV: {runs_csv}')
+    with runs_csv.open(encoding='utf-8') as stream:
+        rows = list(csv.DictReader(stream))
+    expected = {(state, actions, obstacles, drones)
+                for state in STATES for actions in ACTIONS
+                for obstacles in OBSTACLES for drones in DRONES}
+    present = {(row.get('state'), row.get('actions'), row.get('obstacles'), row.get('drones'))
+               for row in rows}
+    if not expected.issubset(present):
+        parser.error('analysis requires all 36 complexity scenarios; for custom/Mukhit configs, '
+                     'use summary_by_environment.csv from run_all.py')
+    fig_dir = args.figures_dir
     fig_dir.mkdir(parents=True, exist_ok=True)
     plot_sets(rows, fig_dir)
     plot_marginals(rows, fig_dir)
