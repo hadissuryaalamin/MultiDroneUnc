@@ -4,6 +4,10 @@ from multi_drone import MultiDroneUnc
 # Replace this with your own online planner
 from planner import Planner
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--config', type=str, required=True, help="Path to the yaml configuration file")
+args = parser.parse_args()
+
 def run(env, planner, planning_time_per_step=1.0):
     # Set the simulator to the initial state
     current_state = env.reset()
@@ -33,14 +37,13 @@ def run(env, planner, planning_time_per_step=1.0):
 
     return total_discounted_reward, history
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, required=True,
-                        help="Path to the yaml configuration file")
-    args = parser.parse_args()
+# Instantiate the environment with the given config
+env = MultiDroneUnc(args.config)
 
-    env = MultiDroneUnc(args.config)
-    planner = Planner(env, a_param=1.0, b_param=2)
-    total_discounted_reward, history = run(env, planner, planning_time_per_step=5.0)
-    print(f"success: {history[-1][5]['success']}, Total discounted reward: {total_discounted_reward}")
-    env.show()
+# Instantiate the planner
+planner = Planner(env, a_param=1.0, b_param=2)
+
+# Run the planning loop
+total_discounted_reward, history = run(env, planner, planning_time_per_step=1.0)
+print(f"success: {history[-1][5]['success']}")
+env.show()
