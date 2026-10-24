@@ -1,4 +1,4 @@
-"""New planner, built step by step: selection, expansion, and greedy rollout."""
+"""New planner stages: selection, expansion, greedy rollout, backpropagation."""
 
 from time import perf_counter
 
@@ -137,6 +137,35 @@ class Planner:
                 break
 
         return reward_sum
+
+    def _backpropagation(
+        self,
+        path: list[tuple[Node, int, float]],
+        rollout_return: float = 0.0,
+    ) -> None:
+        """Update selected per-drone actions with discounted team returns.
+
+        Each path entry is (node, encoded_action, immediate_reward), ordered
+        from the root forward. Pass the rollout return as the continuation
+        value, or zero when the path ended at a terminal transition.
+        Drones already reached in a node's state receive no action update.
+        """
+        return_sum = rollout_return
+        gamma = self._config.discount_factor
+        num_actions = len(self._action_vectors)
+
+        for node, joint_action, reward in reversed(path):
+            return_sum = reward + gamma * return_sum
+            for drone_index, drone_state in enumerate(node.state):
+                action = joint_action % num_actions
+                joint_action //= num_actions
+                if drone_state[3]:
+                    continue
+
+                node.N[drone_index, action] += 1
+                node.Q[drone_index, action] += (
+                    return_sum - node.Q[drone_index, action]
+                ) / node.N[drone_index, action]
 
     def _greedy_action(self, state: np.ndarray) -> int | None:
         """Pick each drone's closest valid target, then combine its action.
