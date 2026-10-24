@@ -1,4 +1,4 @@
-"""New planner, built step by step. Currently implements selection only."""
+"""New planner, built step by step. Implements selection and expansion."""
 
 import numpy as np
 
@@ -12,6 +12,7 @@ class Node:
         shape = (len(state), num_actions_per_drone)
         self.N = np.zeros(shape, dtype=np.int64)
         self.Q = np.zeros(shape, dtype=float)
+        self.children: dict[tuple[int, bytes], Node] = {}
 
 
 class Planner:
@@ -86,6 +87,30 @@ class Planner:
                 return None
 
         return self._encode_action(actions)
+
+    def _expansion(
+        self, node: Node, action: int
+    ) -> tuple[Node, float, bool, dict, bool]:
+        """Sample a transition and find or create its child.
+
+        Returns (child, reward, done, info, is_new). Every call samples a fresh
+        outcome, even for an existing action. New nonterminal children can be
+        evaluated by rollout; existing nonterminal children can be traversed.
+        Terminal outcomes stop the search path. The search loop will handle
+        those decisions in a later step.
+        """
+        if action is None:
+            raise ValueError('Expansion requires a successfully selected action.')
+
+        next_state, reward, done, info = self._env.simulate(node.state, action)
+        key = (action, next_state.tobytes())
+        child = node.children.get(key)
+        is_new = child is None
+        if is_new:
+            child = Node(next_state, len(self._action_vectors))
+            node.children[key] = child
+
+        return child, reward, done, info, is_new
 
     def _encode_action(self, actions: np.ndarray) -> int:
         """Encode drone 0 as the least significant base-A digit."""
