@@ -151,112 +151,115 @@ Sensors accurately identify both positions. Assume movement is discrete and the 
 % ---------------------------------------------------------------------
 \subsection*{B2. Approximate on-line MDP solver}
 
-\paragraph{Overview.} We use Monte Carlo Tree Search (MCTS) with UCT selection and a greedy rollout policy. At each decision step, the planner builds a search tree rooted at the current joint state within the available planning time (at most 10 seconds, without parallelisation). It estimates action values through sampled transitions and discounted returns, then executes the action with the highest estimated value at the root. Sampling avoids enumerating all possible successor states, although a large joint action space remains a limitation.
+\paragraph{Overview.} We use Monte Carlo Tree Search (MCTS) with UCT selection and a greedy rollout policy. At each decision step, the planner builds a search tree rooted at the current joint state within the available planning time (at most 10 seconds, without parallelisation). It estimates action values through sampled transitions and discounted returns, then executes a tried root action with the highest estimated value, breaking equal-value ties uniformly at random. Sampling avoids enumerating all possible successor states, although a large joint action space remains a limitation.
 
-\subsubsection*{Component specification}
-\begin{itemize}[leftmargin=*, itemsep=0.5em]
-  \item \textbf{Selection:} Randomly select an untried action first. Once every action has been tried, use UCB to select $a \leftarrow \arg\max_a \big[Q(s,a)+c\sqrt{\ln N(s)/N(s,a)}\big]$.
-  \item \textbf{Expansion:} Add one new child for the sampled successor state and initialise its visit counts and action values to zero.
-  \item \textbf{Simulation:} Use a greedy rollout: each drone moves closest to its goal. Estimate the new child's value by the discounted return $\hat V=\sum_{t=0}^{T-1}\gamma^t r_t$, stopping at a terminal state or the rollout depth limit.
-  \item \textbf{Backpropagation:} Back up the discounted return to the root, updating the mean action value $Q(s,a)$ and incrementing the visit counts at each step.
+\subsubsection*{1. Selection}
+At the current node, untried joint actions are sampled randomly and checked for valid intended moves. Once no eligible untried actions remain, select the tried eligible action with the highest Upper Confidence Bound (UCB):
+\[
+  a \leftarrow \arg\max_a\left[
+    Q(\text{node},a)+\sqrt{\frac{2\ln N(\text{node})}{N(\text{node},a)}}
+  \right].
+\]
+Here $Q(\text{node},a)$ is the estimated mean discounted return, $N(\text{node},a)$ is the number of times action $a$ has been tried at $\text{node}$, and $N(\text{node})=\sum_a N(\text{node},a)$. UCB balances actions with high estimated returns against actions that have been explored less often.
+
+\paragraph{Validity checks and fallback.} \textsc{Safe}$(s,a)$ decodes the joint action and calculates each drone's intended target directly; a drone already at its goal keeps its current position. It returns true only if every target is inside the grid, outside obstacles and distinct from every other target. It does not call \texttt{env.simulate}, so stochastic outcomes can still collide. Invalid actions are cached at the node. Selection tests at most 64 randomly chosen untried candidates per call, then uses its cached greedy fallback if none passes or the deadline expires. The fallback is checked when first computed; if it is unsafe because no valid joint assignment exists, it is still returned. Tried actions considered by UCB have already passed the intended-target checks.
+
+\subsubsection*{2. Expansion}
+After selecting a joint action $a_i$ at $\text{node}$, call \texttt{env.simulate} to sample a successor joint state $s_j$, reward and terminal flag. Check whether the pair $(a_i,s_j)$ already exists among the children of $\text{node}$:
+\begin{itemize}[leftmargin=*, itemsep=0.35em]
+  \item \textbf{New pair:} Create a child node for $s_j$, initialise its action visit counts and values to zero, and store it under $(a_i,s_j)$.
+  \item \textbf{Existing pair:} Reuse the stored child, move the search to that node and perform Selection again from there.
 \end{itemize}
+The parent is the node currently being visited; it is the root at the start of a search iteration. Because motion is stochastic, selecting the same action can produce different successor states, each stored as a separate outcome child. Tree descent continues through existing children until a new child is created, a terminal outcome is sampled, the depth limit \texttt{max\_num\_steps} is reached, or the planning deadline expires.
 
-\clearpage
-\subsubsection*{Pseudocode}
+\subsubsection*{3. Rollout from a new node}
+If the newly created child is nonterminal, start a rollout from its state using the greedy policy. Its simulated states are not added to the search tree. If the sampled outcome is terminal, skip the rollout. The total number of transitions in the tree and rollout is limited to $D=\texttt{max\_num\_steps}$: a child at depth $d$ has at most $D-d$ rollout steps remaining. The planning deadline also applies throughout.
 
-Let $A$ be the set of joint-action integers, $\gamma$ the configured discount factor, $H$ the search depth limit (the configured maximum number of steps), and $c>0$ the UCB exploration constant. Each node $v$ stores its joint state $s(v)$, action counts $N(v,a)$, mean returns $Q(v,a)$, and successor nodes $C(v,a,s')$; its visit count is $N(v)=\sum_{a} N(v,a)$. A new node has zero counts and values, and no children; untried actions are represented implicitly. Each iteration descends the tree iteratively, records the visited $(v,a,r)$ triples in a path, and backs up the return along that path in reverse. All functions share the planning deadline.
+\paragraph{Choosing a greedy action.} At each rollout step, process each drone that has not yet reached its goal:
+\begin{enumerate}[leftmargin=*, itemsep=0.25em]
+  \item For every available per-drone action vector $u$, calculate the intended candidate position $p_i+u$ directly. There are 26 vectors when altitude changes are enabled and 8 otherwise.
+  \item Discard candidates outside the grid or inside an obstacle.
+  \item Measure the Euclidean distance from each remaining candidate to that drone's goal $g_i$:
+  \[
+    \operatorname{distance}_i(u)=\lVert p_i+u-g_i\rVert_2.
+  \]
+  \item Order candidates from the shortest distance to the longest. Assign targets in drone order, trying the nearest candidate first. If a target is already assigned to another drone, try the next candidate; backtrack to an earlier drone's choice if necessary to obtain distinct targets for all drones.
+\end{enumerate}
+Drones that have reached their goals remain in place and occupy their goal cells. If no joint assignment with distinct, valid targets exists, the implementation uses its per-drone fallback choices, which are not guaranteed to avoid collision.
 
-\begingroup
-\SetKwProg{Fn}{Function}{:}{end}
-\SetKwFunction{Plan}{Plan}
-\SetKwFunction{Select}{Select}
-\SetKwFunction{Rollout}{Rollout}
-\SetKwFunction{Greedy}{GreedyJointAction}
-\SetKwFunction{NewNode}{NewNode}
-\SetKw{Return}{return}
-\SetAlgoNlRelativeSize{-1}
+Candidate distances are calculated without calling \texttt{env.simulate} for every action. Only after choosing and encoding the joint action does the rollout call \texttt{env.simulate} once to sample the next state and reward. Because movement is stochastic, the sampled positions can differ from the intended candidates, so these checks cannot guarantee collision-free outcomes. Repeat greedy action selection from the sampled state until a terminal outcome, the remaining depth limit or the planning deadline is reached, accumulating discounted rewards.
+
+\paragraph{Pseudocode so far.} Algorithm~\ref{alg:mcts-partial} shows one search iteration through the rollout call. Algorithm~\ref{alg:select} details \textsc{Select}, including validity checks, bounded sampling, fallback and UCB; Algorithm~\ref{alg:greedy-rollout} gives the rollout loop. \textsc{GreedyAction} follows the candidate-distance procedure above. Backpropagation is left for the next discussion.
 
 \begin{algorithm}[H]
 \small
-\caption{Online MCTS with UCT selection}
-\label{alg:mcts-uct}
-\Fn{\Plan{$s_0$, timeBudget}}{
-  $root \leftarrow \NewNode(s_0)$\;
-  $deadline \leftarrow now() + timeBudget$\;
-  \While{$now() < deadline$}{
-    $path \leftarrow [\,]$; $v \leftarrow root$; $d \leftarrow H$; $G \leftarrow 0$\;
-    \tcp{Selection, expansion and simulation}
-    \While{$d>0$ and $now() < deadline$}{
-      $a \leftarrow \Select(v)$\;
-      $(s',r,done,info) \leftarrow env.simulate(s(v),a)$\;
-      append $(v,a,r)$ to $path$; $d \leftarrow d-1$\;
-      \If{$done$}{\textbf{break}\;}
-      \If{$C(v,a,s')$ does not exist}{
-        $C(v,a,s') \leftarrow \NewNode(s')$\;
-        $G \leftarrow \Rollout(s',d)$\;
-        \textbf{break}\;
-      }
-      $v \leftarrow C(v,a,s')$\;
-    }
-    \tcp{Backpropagation}
-    \ForEach{$(v,a,r)$ in $path$, in reverse order}{
-      $G \leftarrow r+\gamma G$\;
-      $N(v,a) \leftarrow N(v,a)+1$\;
-      $Q(v,a) \leftarrow Q(v,a)+\frac{G-Q(v,a)}{N(v,a)}$\;
-    }
+\caption{One MCTS iteration: Selection, Expansion and rollout entry}
+\label{alg:mcts-partial}
+\KwIn{Root node, depth limit $D=\texttt{max\_num\_steps}$, planning deadline}
+$\text{node} \leftarrow \text{root}$; $d \leftarrow 0$; $\text{path} \leftarrow [\,]$; $G \leftarrow 0$\;
+\While{$d < D$ and time remains}{
+  $a_i \leftarrow \textsc{Select}(\text{node},\text{deadline})$\;
+  \If{deadline reached}{\textbf{break}\;}
+  $(s_j,r,\text{done}) \leftarrow \texttt{env.simulate}(\text{node}.\text{state},a_i)$\;
+  Append $(\text{node},a_i,r)$ to path; $d \leftarrow d+1$\;
+  $k \leftarrow (a_i,s_j)$\;
+  $\text{isNew} \leftarrow (k \notin \text{node}.\text{children})$\;
+  \If{isNew}{
+    $\text{child} \leftarrow \textsc{NewNode}(s_j)$ with all $N=0$, $Q=0$\;
+    $\text{node}.\text{children}[k] \leftarrow \text{child}$\;
   }
-  \If{no action has been tried at $root$}{
-    \Return \Greedy{$s_0$}\;
+  $\text{child} \leftarrow \text{node}.\text{children}[k]$\;
+  \If{done}{\textbf{break} \tcp*{terminal outcome: no rollout}}
+  \If{isNew}{
+    $G \leftarrow \textsc{Rollout}(\text{child.state},D-d,\text{deadline})$\;
+    \textbf{break}\;
   }
-  \Return $\arg\max_{a:\,N(root,a)>0} Q(root,a)$\;
-}
-\BlankLine
-\Fn{\Select{$v$}}{
-  \If{there exists $a\in A$ with $N(v,a)=0$}{
-    \Return a uniformly sampled untried joint action\;
-  }
-  \Return $\arg\max_{a\in A}\left[Q(v,a)+c\sqrt{\frac{\ln N(v)}{N(v,a)}}\right]$\;
+  $\text{node} \leftarrow \text{child}$ \tcp*{existing pair: repeat Selection here}
 }
 \end{algorithm}
 
-\clearpage
 \begin{algorithm}[H]
 \small
-\caption{Greedy rollout and joint-action construction}
+\caption{\textsc{Select}$(\text{node},\text{deadline})$: choose a joint action}
+\label{alg:select}
+\KwIn{Node $\text{node}$ with state, visit counts $N$, values $Q$ and invalid-action flags}
+\If{fallback has not been initialised at $\text{node}$}{
+  $\text{node}.\text{fallback} \leftarrow \textsc{GreedyAction}(\text{node}.\text{state})$\;
+  $\text{node}.\text{hasSafe} \leftarrow \textsc{Safe}(\text{node}.\text{state},\text{node}.\text{fallback})$\;
+}
+\If{not $\text{node}.\text{hasSafe}$}{\Return{$\text{node}.\text{fallback}$}\;}
+$U \leftarrow \{a : N(\text{node},a)=0 \text{ and } a \text{ is not flagged invalid}\}$\;
+\If{$U \neq \varnothing$}{
+  $m \leftarrow \min(64,|U|)$\;
+  \For{$j \leftarrow 1$ \KwTo $m$}{
+    \If{deadline reached}{\Return{$\text{node}.\text{fallback}$}\;}
+    Sample $a$ uniformly at random from $U$\;
+    \If{\textnormal{\textsc{Safe}}$(\text{node}.\text{state},a)$}{\Return{$a$}\;}
+    Flag $a$ invalid at $\text{node}$; remove $a$ from $U$\;
+  }
+  \Return{$\text{node}.\text{fallback}$}\;
+}
+$T \leftarrow \{a : N(\text{node},a)>0 \text{ and } a \text{ is not flagged invalid}\}$\;
+\If{$T=\varnothing$}{\Return{$\text{node}.\text{fallback}$}\;}
+$n \leftarrow \sum_{b\in T}N(\text{node},b)$\;
+\Return{$\displaystyle\arg\max_{a\in T}\left[Q(\text{node},a)+\sqrt{\frac{2\ln n}{N(\text{node},a)}}\right]$}\;
+\end{algorithm}
+
+\begin{algorithm}[H]
+\small
+\caption{\textsc{Rollout}: discounted return using greedy actions}
 \label{alg:greedy-rollout}
-\Fn{\Rollout{$s,d$}}{
-  $G \leftarrow 0$; $w \leftarrow 1$\;
-  \For{$t\leftarrow 1$ \KwTo $d$}{
-    \If{$now() \ge deadline$}{\textbf{break}\;}
-    $a \leftarrow \Greedy(s)$\;
-    $(s',r,done,info) \leftarrow env.simulate(s,a)$\;
-    $G \leftarrow G+w\,r$\;
-    \If{$done$}{\textbf{break}\;}
-    $s \leftarrow s'$; $w \leftarrow w\gamma$\;
-  }
-  \Return $G$\;
+\KwIn{New child state $s$, remaining depth $L=D-d$, planning deadline}
+$\hat{s} \leftarrow \text{copy}(s)$; $G \leftarrow 0$; $w \leftarrow 1$\;
+\For{$t \leftarrow 1$ \KwTo $L$}{
+  \If{deadline reached}{\textbf{break}\;}
+  $a \leftarrow \textsc{GreedyAction}(\hat{s})$\;
+  $(\hat{s},r,\text{done}) \leftarrow \texttt{env.simulate}(\hat{s},a)$\;
+  $G \leftarrow G+w\,r$; $w \leftarrow \gamma w$\;
+  \If{done}{\textbf{break}\;}
 }
-\BlankLine
-\Fn{\Greedy{$s$}}{
-  \For{each drone $i$}{
-    \eIf{drone $i$ has already reached its goal}{
-      $a_i \leftarrow 0$ \tcp*{The simulator keeps it at its goal.}
-    }{
-      $F_i \leftarrow$ moves with intended destinations inside free grid cells\;
-      \eIf{$F_i\ne\varnothing$}{
-        $a_i \leftarrow \arg\min_{u\in F_i}\|p_i+\Delta(u)-g_i\|_2$\;
-        Break ties uniformly at random\;
-      }{
-        $a_i \leftarrow$ uniformly sample a per-drone action\;
-      }
-    }
-  }
-  \Return $\sum_{i=1}^{N}a_i m^{i-1}$, where $m$ is the number of per-drone actions\;
-}
+\Return{$G$}\;
 \end{algorithm}
-\endgroup
-
-\noindent Here $p_i$ and $g_i$ are drone $i$'s current and goal positions, and $\Delta(u)$ is the displacement of per-drone action $u$. Action indices run from $0$ to $m-1$, where $m=8$ without altitude changes and $m=26$ otherwise. The grid size, obstacle cells, goal positions and per-drone moves are read from the environment configuration (\texttt{get\_config()}), so the planner only uses \texttt{simulate}, \texttt{get\_config} and \texttt{num\_actions}. The greedy policy evaluates intended destinations only; the simulator samples actual motion and detects both obstacle and inter-drone collisions. Each simulated transition uses the simulator's reward and terminal signal. Since transitions are stochastic, the same action can have multiple successor nodes. When the depth limit or deadline is reached, the remaining return is approximated as zero. The main execution loop applies the selected action using \texttt{env.step}, observes the next joint state, and calls \Plan{} again.
 
 % ---------------------------------------------------------------------
 \subsection*{B4. Empirical investigation of problem complexity}
