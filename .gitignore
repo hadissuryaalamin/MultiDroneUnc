@@ -210,6 +210,4 @@ docs/
 report/*
 !report/a2_report.tex
 tmp/
-experiments/results/
-benchmarks/
-experiments/configs/Mukhit
+experiments/
