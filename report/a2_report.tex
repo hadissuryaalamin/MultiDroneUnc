@@ -151,147 +151,136 @@ Sensors accurately identify both positions. Assume movement is discrete and the 
 % ---------------------------------------------------------------------
 \subsection*{B2. Approximate on-line MDP solver}
 
-We use centralised MCTS with UCT selection and greedy rollouts. Each real step builds a fresh tree and repeats Selection, Expansion, Rollout and Backpropagation until the planning deadline. The depth limit $D=\texttt{max\_num\_steps}$ covers both tree transitions and rollout steps.
+The current \texttt{planner.py} implements centralised Monte Carlo Tree Search (MCTS) with \emph{per-drone} UCB action statistics and sequential action assembly. There is one tree over the complete multi-drone state, rather than a separate tree for each drone. Selection chooses individual actions in drone-index order, then combines them for the simulator. A fresh tree is built for every real decision; selection, expansion, greedy rollout and backpropagation repeat until the wall-clock budget expires.
 
-\paragraph{Notation.} $N(\mathrm{node},a)$ is the visit count and $Q(\mathrm{node},a)$ the mean discounted return. GreedyAction uses $n$ drones and $m$ actions per drone; drone $i$ contributes $a_i m^i$ to the joint-action ID. $\mathrm{NONE}$ differs from action ID $0$; $\_$ ignores a returned value. Slices exclude their end index.
+\paragraph{State, actions and node statistics.}
+A node stores a copy of the simulator state: each drone's three coordinates and reached-goal flag. Let $n$ be the number of drones and $m\in\{8,26\}$ the number of moves per drone, depending on whether altitude changes are allowed. Active drones have no stay action. The simulator's action-vector order is preserved, and the combined action is encoded as
+\[
+  a=\sum_{i=0}^{n-1} a_i m^i,
+\]
+so drone 0 is the least significant digit. Actions for drones already at their goals are ignored by the simulator.
 
-\paragraph{Node initialisation.} \textsc{NewNode} copies the state, sets every $N$ and $Q$ to zero and every invalid flag to false, creates empty children, and sets fallback to $\mathrm{NONE}$ and hasSafe to false. \textsc{Safe} checks intended targets only; stochastic outcomes can still collide.
+Each new node initialises two $n\times m$ arrays to zero: $N_v(i,u)$ counts updates for drone $i$ choosing move $u$ at node $v$, and $Q_v(i,u)$ is its mean sampled \emph{team} return. Its child dictionary is initially empty. For four drones with 26 moves, each statistics array has $4\cdot26=104$ entries instead of $26^4=456\,976$. This reduces the action-statistics table; the simulator still takes joint actions, and the tree can still branch over many action--outcome combinations.
 
-\begin{algorithm}[H]
-\small
-\caption{\textsc{Plan}$(\mathrm{state},\mathrm{budget})$}
-\label{alg:plan}
-$\mathrm{root}\leftarrow\textsc{NewNode}(\mathrm{state})$; $\mathrm{deadline}\leftarrow\mathrm{now}+\mathrm{budget}$\;
-$D\leftarrow\texttt{max\_num\_steps}$; $\gamma\leftarrow\texttt{discount\_factor}$\;
-\While{$\mathrm{now}<\mathrm{deadline}$}{
-  $\mathrm{node}\leftarrow\mathrm{root}$; $\mathrm{path}\leftarrow[\,]$; $d\leftarrow0$; $G\leftarrow0$\;
-  \While{$d<D$ and $\mathrm{now}<\mathrm{deadline}$}{
-    $a\leftarrow\textsc{Select}(\mathrm{node},\mathrm{deadline})$ \tcp*{Selection}
-    \If{$\mathrm{now}\geq\mathrm{deadline}$}{\textbf{break}\;}
-    $(\mathrm{nextState},\mathrm{reward},\mathrm{done})\leftarrow\texttt{env.simulate}(\mathrm{node.state},a)$\;
-    Append $(\mathrm{node},a,\mathrm{reward})$ to path; $d\leftarrow d+1$\;
-    $k\leftarrow(a,\mathrm{nextState})$; $\mathrm{isNew}\leftarrow(k\notin\mathrm{node.children})$\;
-    \If{isNew}{
-      $\mathrm{node.children}[k]\leftarrow\textsc{NewNode}(\mathrm{nextState})$ \tcp*{Expansion}
-    }
-    $\mathrm{child}\leftarrow\mathrm{node.children}[k]$\;
-    \If{done}{\textbf{break}\;}
-    \If{isNew}{
-      $G\leftarrow\textsc{Rollout}(\mathrm{child.state},D-d,\mathrm{deadline})$\;
-      \textbf{break}\;
-    }
-    $\mathrm{node}\leftarrow\mathrm{child}$\;
-  }
-  \ForEach{$(\mathrm{node},a,\mathrm{reward})$ in reverse(path)}{
-    $G\leftarrow\mathrm{reward}+\gamma G$ \tcp*{Backpropagation}
-    $N(\mathrm{node},a)\leftarrow N(\mathrm{node},a)+1$\;
-    $Q(\mathrm{node},a)\leftarrow Q(\mathrm{node},a)+\dfrac{G-Q(\mathrm{node},a)}{N(\mathrm{node},a)}$\;
-  }
-}
-$T\leftarrow\{a:N(\mathrm{root},a)>0\}$\;
-\If{$T=\varnothing$}{
-  \If{$\mathrm{root.fallback}\neq\mathrm{NONE}$}{\Return{$\mathrm{root.fallback}$}\;}
-  $(a,\_)\leftarrow\textsc{GreedyAction}(\mathrm{state})$; \Return{$a$}\;
-}
-$\mathrm{bestQ}\leftarrow\max_{a\in T}Q(\mathrm{root},a)$\;
-\Return{a uniformly random action from $\{a\in T:Q(\mathrm{root},a)=\mathrm{bestQ}\}$}\;
-\end{algorithm}
+\paragraph{1. Selection.}
+For each active drone, selection uses
+\[
+ U_v(i,u)=
+ \begin{cases}
+  +\infty, & N_v(i,u)=0,\\[2pt]
+  Q_v(i,u)+\sqrt{\dfrac{2\ln\!\left(\max\{1,\sum_b N_v(i,b)\}\right)}{N_v(i,u)}},
+      & N_v(i,u)>0.
+ \end{cases}
+\]
+Equal maxima, including multiple infinite values, are broken uniformly at random using the seeded planner RNG. There is no separate untried-action list, time-dependent exploration probability or configurable exploration coefficient in this implementation.
+
+Before choosing, all reached drones' cells are reserved. Each active drone excludes out-of-grid and obstacle targets, then takes its highest-UCB candidate. If its intended target is reserved, it rejects that candidate and tries another. Accepted targets are reserved for later drones. Earlier choices remain fixed: there is no backtracking, and selection returns $\mathrm{NONE}$ if a drone exhausts its candidates. A rejected candidate is not permanently marked invalid. Algorithm~\ref{alg:select} expresses this filtering equivalently by excluding all currently reserved targets before maximisation.
 
 \begin{algorithm}[H]
 \small
-\caption{\textsc{Select}$(\mathrm{node},\mathrm{deadline})$}
+\caption{\textsc{Select}$(v)$: per-drone UCB and sequential reservations}
 \label{alg:select}
-\If{$\mathrm{node.fallback}=\mathrm{NONE}$}{
-  $(\mathrm{node.fallback},\mathrm{node.hasSafe})\leftarrow\textsc{GreedyAction}(\mathrm{node.state})$\;
+$O\leftarrow\{$positions of all reached drones in $v.\mathrm{state}\}$; $\mathbf{a}\leftarrow\mathbf{0}$\;
+\For{$i\leftarrow0$ \KwTo $n-1$}{
+  \If{drone $i$ has reached its goal}{\textbf{continue}\;}
+  $C\leftarrow\{u:\mathrm{target}(i,u)\text{ is in bounds, not an obstacle, and not in }O\}$\;
+  \If{$C=\varnothing$}{\Return{$\mathrm{NONE}$}\;}
+  $a_i\leftarrow$ uniformly random member of $\arg\max_{u\in C} U_v(i,u)$\;
+  $O\leftarrow O\cup\{\mathrm{target}(i,a_i)\}$\;
 }
-\If{not $\mathrm{node.hasSafe}$}{\Return{$\mathrm{node.fallback}$}\;}
-$U\leftarrow\{a:N(\mathrm{node},a)=0\text{ and }a\text{ is not flagged invalid}\}$\;
-\If{$U\neq\varnothing$}{
-  $\mathrm{attempts}\leftarrow\min(64,|U|)$\;
-  \For{$j\leftarrow1$ \KwTo $\mathrm{attempts}$}{
-    \If{$\mathrm{now}\geq\mathrm{deadline}$}{\Return{$\mathrm{node.fallback}$}\;}
-    $a\leftarrow$ uniformly random action from $U$\;
-    \If{\textnormal{\textsc{Safe}}$(\mathrm{node.state},a)$}{\Return{$a$}\;}
-    Flag $a$ invalid at node; remove $a$ from $U$\;
-  }
-  \Return{$\mathrm{node.fallback}$}\;
+\Return{$\sum_i a_i m^i$}\;
+\end{algorithm}
+
+\paragraph{2. Expansion.}
+For every selected combined action, \texttt{env.simulate} samples a fresh transition $(s',r,\mathrm{done},\mathrm{info})$, including when that action has been tried before. Children are keyed by the action ID and next-state bytes (\texttt{s'.tobytes()}), so distinct sampled next states for the same action have distinct children. An absent key creates a new node; an existing key reuses its child. A terminal transition stops the search path. A new nonterminal child starts a rollout; an existing nonterminal child permits further tree selection. The transition model and reward are supplied by the simulator, rather than learned by the planner.
+
+\paragraph{3. Greedy rollout.}
+\textsc{GreedyAction} chooses drones sequentially with the same target reservations as selection, but minimises Euclidean distance from the intended next position to that drone's own goal. Equal distances keep the first move in simulator action order. It does not search for a shortest path around obstacles or revise earlier drones' choices.
+
+\begin{algorithm}[H]
+\small
+\caption{\textsc{GreedyAction}$(s)$}
+\label{alg:greedy-action}
+$O\leftarrow\{$positions of all reached drones in $s\}$; $\mathbf{a}\leftarrow\mathbf{0}$\;
+\For{$i\leftarrow0$ \KwTo $n-1$}{
+  \If{drone $i$ has reached its goal}{\textbf{continue}\;}
+  $C\leftarrow\{u:\mathrm{target}(i,u)\text{ is in bounds, not an obstacle, and not in }O\}$\;
+  \If{$C=\varnothing$}{\Return{$\mathrm{NONE}$}\;}
+  $a_i\leftarrow$ first member of $\arg\min_{u\in C}\lVert\mathrm{target}(i,u)-\mathrm{goal}_i\rVert_2$\;
+  $O\leftarrow O\cup\{\mathrm{target}(i,a_i)\}$\;
 }
-$T\leftarrow\{a:N(\mathrm{node},a)>0\text{ and }a\text{ is not flagged invalid}\}$\;
-\If{$T=\varnothing$}{\Return{$\mathrm{node.fallback}$}\;}
-$n\leftarrow\sum_{b\in T}N(\mathrm{node},b)$\;
-\Return{$\displaystyle\arg\max_{a\in T}\left[Q(\mathrm{node},a)+\sqrt{\frac{2\ln n}{N(\mathrm{node},a)}}\right]$} \tcp*{first maximum}
+\Return{$\sum_i a_i m^i$}\;
 \end{algorithm}
 
 \begin{algorithm}[H]
 \small
-\caption{\textsc{Rollout}$(\mathrm{state},\mathrm{remainingDepth},\mathrm{deadline})$}
+\caption{\textsc{Rollout}$(s,h,\mathrm{deadline})$}
 \label{alg:greedy-rollout}
-$\hat{s}\leftarrow\mathrm{copy}(\mathrm{state})$; $G\leftarrow0$; $\mathrm{discount}\leftarrow1$\;
-\For{$t\leftarrow1$ \KwTo $\mathrm{remainingDepth}$}{
+$\hat{s}\leftarrow\mathrm{copy}(s)$; $G\leftarrow0$; $w\leftarrow1$\;
+\If{all drones have reached their goals}{\Return{$G$}\;}
+\For{$t\leftarrow1$ \KwTo $h$}{
   \If{$\mathrm{now}\geq\mathrm{deadline}$}{\textbf{break}\;}
-  $(a,\_)\leftarrow\textsc{GreedyAction}(\hat{s})$\;
-  $(\hat{s},\mathrm{reward},\mathrm{done})\leftarrow\texttt{env.simulate}(\hat{s},a)$\;
-  $G\leftarrow G+\mathrm{discount}\cdot\mathrm{reward}$; $\mathrm{discount}\leftarrow\gamma\,\mathrm{discount}$\;
+  $a\leftarrow\textsc{GreedyAction}(\hat{s})$\;
+  \If{$a=\mathrm{NONE}$ or $\mathrm{now}\geq\mathrm{deadline}$}{\textbf{break}\;}
+  $(\hat{s},r,\mathrm{done},\_)\leftarrow\texttt{env.simulate}(\hat{s},a)$\;
+  $G\leftarrow G+w r$; $w\leftarrow\gamma w$\;
   \If{done}{\textbf{break}\;}
 }
 \Return{$G$}\;
 \end{algorithm}
 
+Rollout transitions do not add tree nodes or update action statistics directly. A collision includes the simulator's penalty and terminates that rollout; the action that led to it remains available for future sampling. At a depth, time or action-availability cutoff, the continuation beyond the sampled rewards is zero; there is no heuristic bootstrap value.
+
+\paragraph{4. Backpropagation.}
+Starting with the rollout return, traverse the recorded tree path backwards and apply $G\leftarrow r+\gamma G$, where $\gamma=\texttt{discount\_factor}$. Decode each combined action, and update every drone that was active in that node's state:
+\[
+ N_v(i,a_i)\leftarrow N_v(i,a_i)+1,\qquad
+ Q_v(i,a_i)\leftarrow Q_v(i,a_i)+\frac{G-Q_v(i,a_i)}{N_v(i,a_i)}.
+\]
+All selected active drones receive the same full team return, without division by the number of drones or individual reward attribution. Thus $Q_v(i,u)$ averages returns across the other drones' sampled choices; it does not isolate that drone's contribution. Drones already at their goals in the parent state receive no update, while a drone reaching its goal on this transition does.
+
+\paragraph{Search loop and returned action.}
+The horizon $D=\texttt{max\_num\_steps}$ bounds tree transitions plus rollout transitions per search iteration. It is reset for every call to \texttt{plan()}, rather than reduced by the number of real episode steps already executed. Algorithm~\ref{alg:plan} summarises the control flow; \textsc{Expand} is the transition-and-child lookup described above, and \textsc{Backpropagate} applies the preceding updates.
+
 \begin{algorithm}[H]
 \small
-\caption{\textsc{GreedyAction}$(\mathrm{state})$}
-\label{alg:greedy-action}
-$\mathrm{choices}\leftarrow$ empty list for each drone; $\mathrm{fallbackAction}\leftarrow0$\;
-\ForEach{drone index $i=0,\ldots,n-1$}{
-  \If{drone $i$ has reached its goal}{
-    $\mathrm{choices}[i]\leftarrow[0]$; \textbf{continue}\;
-  }
-  $\mathrm{position}\leftarrow\mathrm{state}[i,0{:}3]$\;
-  $\mathrm{choices}[i]\leftarrow$ action IDs with $\mathrm{position}+\mathrm{vector}[a]$ inside the grid\;
-  Stably sort choices[$i$] by $\lVert\mathrm{position}+\mathrm{vector}[a]-\mathrm{goal}[i]\rVert_2$\;
-  \If{choices[$i$] is empty}{\textbf{continue}\;}
-  $\mathrm{fallbackId}\leftarrow\mathrm{choices}[i][0]$\;
-  \ForEach{$a$ in choices[$i$], in order}{
-    \If{\textnormal{\textsc{Safe}}$(\mathrm{state}[i{:}i+1],a)$}{
-      $\mathrm{fallbackId}\leftarrow a$; \textbf{break}\;
+\caption{\textsc{Plan}$(s,\mathrm{budget})$}
+\label{alg:plan}
+$\mathrm{deadline}\leftarrow\mathrm{now}+\mathrm{budget}$\;
+\If{all drones have reached their goals}{\Return{$0$}\;}
+$\mathrm{root}\leftarrow\textsc{NewNode}(s)$; $f\leftarrow\mathrm{NONE}$; $D\leftarrow\texttt{max\_num\_steps}$\;
+\While{$D>0$ and $\mathrm{now}<\mathrm{deadline}$}{
+  $v\leftarrow\mathrm{root}$; $P\leftarrow[\,]$; $d\leftarrow0$; $G\leftarrow0$\;
+  \While{$d<D$ and $\mathrm{now}<\mathrm{deadline}$}{
+    $a\leftarrow\textsc{Select}(v)$\;
+    \If{$\mathrm{now}\geq\mathrm{deadline}$}{\textbf{break}\;}
+    \If{$a=\mathrm{NONE}$}{
+      \If{$P\neq[\,]$}{$G\leftarrow\textsc{Rollout}(v.\mathrm{state},D-d,\mathrm{deadline})$\;}
+      \textbf{break}\;
     }
+    $(c,r,\mathrm{done},\_,\mathrm{isNew})\leftarrow\textsc{Expand}(v,a)$\;
+    Append $(v,a,r)$ to $P$; $d\leftarrow d+1$\;
+    \If{$v=\mathrm{root}$}{$f\leftarrow a$\;}
+    \If{done}{\textbf{break}\;}
+    \If{isNew}{
+      $G\leftarrow\textsc{Rollout}(c.\mathrm{state},D-d,\mathrm{deadline})$; \textbf{break}\;
+    }
+    $v\leftarrow c$\;
   }
-  $\mathrm{fallbackAction}\leftarrow\mathrm{fallbackAction}+\mathrm{fallbackId}\,m^i$\;
+  $\textsc{Backpropagate}(P,G)$\;
 }
-$\mathrm{jointAction}\leftarrow\textsc{Assign}(0,0)$\;
-\If{$\mathrm{jointAction}=\mathrm{NONE}$}{\Return{$(\mathrm{fallbackAction},\mathrm{false})$}\;}
-\Return{$(\mathrm{jointAction},\mathrm{true})$}\;
+$a\leftarrow\textsc{BestAction}(\mathrm{root})$\;
+\If{$a\neq\mathrm{NONE}$}{\Return{$a$}\;}
+\If{$f\neq\mathrm{NONE}$}{\Return{$f$}\;}
+$a\leftarrow\textsc{GreedyAction}(s)$\;
+\If{$a=\mathrm{NONE}$}{raise RuntimeError\;}
+\Return{$a$}\;
 \end{algorithm}
 
-\begin{algorithm}[H]
-\small
-\caption{\textsc{Assign}$(i,\mathrm{jointAction})$; shares state and choices with \textsc{GreedyAction}}
-\label{alg:assign}
-\If{$i=n$}{\Return{$\mathrm{jointAction}$}\;}
-\ForEach{$a$ in choices[$i$], in order}{
-  $\mathrm{candidateAction}\leftarrow\mathrm{jointAction}+a\,m^i$\;
-  \If{not \textnormal{\textsc{Safe}}$(\mathrm{state}[0{:}i+1],\mathrm{candidateAction})$}{\textbf{continue}\;}
-  $\mathrm{result}\leftarrow\textsc{Assign}(i+1,\mathrm{candidateAction})$\;
-  \If{$\mathrm{result}\neq\mathrm{NONE}$}{\Return{$\mathrm{result}$}\;}
-}
-\Return{$\mathrm{NONE}$}\;
-\end{algorithm}
+\textsc{BestAction} assembles a move sequentially using only tried per-drone actions ($N_v(i,u)>0$), maximising $Q_v(i,u)$ with uniform random tie breaking and the same target reservations. The resulting combination need not have been simulated jointly. If this assembly fails, the planner returns the most recently simulated root action; if there is none, it tries the greedy policy. Failure of that final policy raises an error, even though a different earlier assignment might have been feasible. Deadline checks occur between operations, so the budget is a stopping target rather than a strict bound on execution time.
 
-\begin{algorithm}[H]
-\small
-\caption{\textsc{Safe}$(\mathrm{state},a)$: check intended targets}
-\label{alg:safe}
-$\mathrm{occupied}\leftarrow\varnothing$\;
-\ForEach{drone row in state, in order}{
-  $\mathrm{actionId}\leftarrow a\bmod m$; $a\leftarrow\lfloor a/m\rfloor$\;
-  $\mathrm{target}\leftarrow\mathrm{drone}[0{:}3]$\;
-  \If{drone has not reached its goal}{$\mathrm{target}\leftarrow\mathrm{target}+\mathrm{vector}[\mathrm{actionId}]$\;}
-  \If{target is outside the grid}{\Return{false}\;}
-  \If{target is an obstacle or already in occupied}{\Return{false}\;}
-  Add target to occupied\;
-}
-\Return{true}\;
-\end{algorithm}
+\paragraph{Practical limits.}
+Reservations prevent duplicate \emph{intended} endpoints and intended obstacle entries. They do not guarantee collision-free stochastic outcomes or check edge swaps and crossing paths. Fixed drone order can favour earlier drones, and the shared team return gives only coarse credit assignment. The UCB bonus has a fixed scale while $Q$ uses unnormalised discounted team rewards; consequently large reward differences can dominate exploration among tried actions. These are properties of the implementation, not measured improvements over the earlier planner. B4 retains the historical experiment results for that earlier version.
 
 % ---------------------------------------------------------------------
 \subsection*{B4. Empirical investigation of problem complexity}
@@ -299,7 +288,8 @@ $\mathrm{occupied}\leftarrow\varnothing$\;
 \subsubsection*{Experimental setup}
 \begin{itemize}[nosep]
   \item Hardware / software: Intel Core i5-13450HX (10 cores, 16 threads), 16\,GB RAM, Windows 11, Python 3.14.3, NumPy 2.5, SciPy 1.18.
-  \item Solver: the MCTS planner of B2, unchanged ($a=1.0$, $b=2$), with a planning budget of 8\,s per step (within the 10\,s limit) and search depth limit $D=\texttt{max\_num\_steps}=100$.
+  \item Solver: the earlier joint-action MCTS implementation, archived at\newline
+  \nolinkurl{experiments/results/complexity_10runs_8s/planner.py}. The planning budget was 8\,s per step (within the 10\,s limit), with search depth limit $D=\texttt{max\_num\_steps}=100$. These measurements predate the per-drone implementation described in B2.
   \item MDP parameters (all scenarios): step cost $-1$, collision penalty $-50$, goal reward $100$, $\gamma=0.98$, $\alpha=0.5$, episode limit 100 steps.
   \item Runs per scenario: $n=10$, with simulator and planner seeds $0,\dots,9$; 360 episodes in total. Episodes were run headless by \texttt{experiments/run\_all.py}, four episodes at a time in separate processes (one per core, BLAS threads pinned to 1). Because the budget is wall-clock time, this costs every scenario a similar fraction of iterations.
   \item 95\% CIs: $\bar{x} \pm t_{0.975,\,n-1}\, s/\sqrt{n}$ for continuous metrics, and the Wilson score interval for the success rate (a $t$-interval is degenerate when all runs succeed or all fail).
@@ -321,7 +311,7 @@ $\mathrm{occupied}\leftarrow\varnothing$\;
   \item \textbf{Clutter}: \emph{sparse} (full-height pillars on 5\% of the XY footprint), \emph{dense} (20\%) and \emph{narrow passage} (a wall across the whole grid at $x=X/2$ with a single one-cell gap in the centre). Pillars are placed with a fixed seed, the start and goal columns are kept free, and a BFS check guarantees that every drone still has a path to its goal. Obstacles span every altitude, so 26-action drones cannot simply fly over them and both action settings face the same layout.
   \item \textbf{Number of drones} $N\in\{1,4\}$ is crossed with every factor. Since $|S|\approx(\text{cells})^N$ and $|A|=m^N$, $N$ scales both spaces exponentially; reporting each factor separately for $N=1$ and $N=4$ shows whether its effect is amplified in the joint problem.
 \end{itemize}
-Crossing all levels gives a full factorial of $3\times2\times3\times2=36$ scenarios (configs in \texttt{experiments/configs/complexity/}, generated by \texttt{experiments/gen\_configs.py} and named by level, e.g.\ \texttt{Smedium\_A8\_Osparse\_n1.yaml}). From it we take three one-factor-at-a-time sets around a common baseline (medium grid, 8 actions, sparse clutter), and we also use the full factorial to average each factor over all the others.
+The full factorial contains $3\times2\times3\times2=36$ scenarios. Configurations are stored in \nolinkurl{experiments/configs/complexity/} and generated by \nolinkurl{experiments/gen_configs.py}. Names encode the levels, for example \nolinkurl{Smedium_A8_Osparse_n1.yaml}. From this factorial we take three one-factor-at-a-time sets around a common baseline (medium grid, 8 actions, sparse clutter), and we also use it to average each factor over all the others.
 
 \begin{table}[H]
 \centering
@@ -433,7 +423,7 @@ Drones $N$ & 1 & 0.59 [0.52, 0.66] & $9.7 \pm 8.2$ & $0.59 \pm 0.07$ & $30.7 \pm
 
 \paragraph{Effect of the planning budget.} A pilot run of the same 360 episodes with a 1\,s budget gave the same ranking (clutter $>$ state space $>$ action space). Raising the budget to 8\,s gave about eight times as many simulations per step, and average success rose only from 0.33 to 0.37. The gains are where the problem is limited by search: narrow passage (0.18 to 0.28), four drones (0.11 to 0.16) and 26 actions (0.36 to 0.44). Dense clutter did not improve at all (0.17 in both). More search lets the solver find the gap or a joint action that avoids the other drones, but it cannot remove the collision risk of moving next to obstacles, which the current \textsc{Safe} check and rollout do not model.
 
-\paragraph{Limitations and possible improvements.} Ten runs per scenario give wide intervals (a Wilson interval at $p=0.5$ spans about $\pm0.3$), so differences of $\le0.2$ in success between neighbouring levels are not statistically resolved; the full-factorial averages over 120--180 episodes are much tighter. The results suggest three targeted improvements to the proposed solver: (i) make \textsc{Safe} and the rollout risk-aware by penalising targets with a small obstacle distance $d$, since $1-p_{\text{succ}}$ grows next to obstacles; (ii) replace the straight-line rollout heuristic with a precomputed shortest-path (BFS) distance around obstacles, which would point drones at the gap in a narrow passage; and (iii) for $N>1$, factor the root search per drone (or widen it progressively) so that the budget is not spread over $m^N$ joint actions.
+\paragraph{Limitations and possible improvements.} Ten runs per scenario give wide intervals (a Wilson interval at $p=0.5$ spans about $\pm0.3$), so differences of $\le0.2$ in success between neighbouring levels are not statistically resolved; the full-factorial averages over 120--180 episodes are much tighter. The historical results suggest three targeted improvements to the evaluated joint-action solver: (i) make \textsc{Safe} and the rollout risk-aware by penalising targets with a small obstacle distance $d$, since $1-p_{\text{succ}}$ grows next to obstacles; (ii) replace the straight-line rollout heuristic with a precomputed shortest-path (BFS) distance around obstacles, which would point drones at the gap in a narrow passage; and (iii) for $N>1$, factor the root search per drone (or widen it progressively) so that the budget is not spread over $m^N$ joint actions. Per-drone action statistics are now implemented in B2, but their effect has not been remeasured in these experiments.
 
 % =====================================================================
 \appendix
