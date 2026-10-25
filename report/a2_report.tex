@@ -116,12 +116,16 @@ For all $p\in[0,1]$, $V_{\alpha_4}(p)=2-p<V_{\max}(p)$ and $V_{\alpha_5}(p)=4.5p
 Sensors accurately identify both positions. Assume movement is discrete and the next state depends only on the current positions and action. An MDP policy maps the observed state to the best action: if a pedestrian blocks the cell ahead, choose Stay; otherwise, choose Move when safe. Since the complete state is observed, a POMDP belief is unnecessary.
 
 \paragraph{Scenario where POMDP is suitable.}
-\todo{Describe the scenario, e.g.\ what part of the state the car cannot observe even with good sensors (pedestrian intention/destination?).}
 \begin{itemize}[nosep]
-  \item State (observed and hidden parts): \todo{}
-  \item Observations: \todo{}
-  \item Why reasoning over a belief changes the decision: \todo{}
+  \item S: [car\_position, pedestrian\_position, destination], destination $\in$ \{cross, footpath\} (hidden)
+  \item A: [Stay, Move]
+  \item O: [car\_position, pedestrian\_position]
+  \item T: the pedestrian moves stochastically toward their destination
+  \item Z: both positions are observed exactly; the destination is not observed
+  \item R: step cost, large penalty for hitting the pedestrian
+  \item $b_0$: uniform over destination
 \end{itemize}
+Sensors give both positions, but not where the pedestrian is going. At each step the car picks the action with the highest expected value under its current belief: if $b(\text{cross})$ is high, Move risks a collision, so it chooses Stay; if low, Move is safe. After acting, it observes the new positions and updates $b(\text{destination})$ using T and Z.
 
 % =====================================================================
 \section*{Part B}
