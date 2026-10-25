@@ -27,7 +27,7 @@ GRIDS = {
     "large": (20, 20, 10),
 }
 ACTIONS = {8: False, 26: True}
-CLUTTER_DENSITY = {"sparse": 0.05, "dense": 0.20}
+CLUTTER_DENSITY = {"sparse": 0.02, "dense": 0.10}
 NUM_DRONES = [1, 4]
 SEED = 0
 

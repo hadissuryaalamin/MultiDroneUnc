@@ -44,6 +44,6 @@ env = MultiDroneUnc(args.config)
 planner = Planner(env, a_param=1.0, b_param=2)
 
 # Run the planning loop
-total_discounted_reward, history = run(env, planner, planning_time_per_step=1.0)
+total_discounted_reward, history = run(env, planner, planning_time_per_step=6.0)
 print(f"success: {history[-1][5]['success']}")
 env.show()
