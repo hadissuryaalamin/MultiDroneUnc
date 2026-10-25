@@ -18,7 +18,8 @@ class Node:
 
 
 class Planner:
-    def __init__(self, env: MultiDroneUnc):
+    def __init__(self, env: MultiDroneUnc, a_param: float = 1.0, b_param: float = 2):
+        """Accept unused a_param and b_param for compatibility with the runner."""
         self._env = env
         self._config = env.get_config()
         self._rng = np.random.default_rng(self._config.seed)
