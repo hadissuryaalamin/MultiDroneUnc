@@ -172,9 +172,9 @@ For each active drone, selection uses
       & N_v(i,u)>0.
  \end{cases}
 \]
-Equal maxima, including multiple infinite values, are broken uniformly at random using the seeded planner RNG. There is no separate untried-action list, time-dependent exploration probability or configurable exploration coefficient in this implementation.
+Equal maxima, including multiple infinite values, are broken uniformly at random using the seeded planner RNG.
 
-Before choosing, all reached drones' cells are reserved. Each active drone excludes out-of-grid and obstacle targets, then takes its highest-UCB candidate. If its intended target is reserved, it rejects that candidate and tries another. Accepted targets are reserved for later drones. Earlier choices remain fixed: there is no backtracking, and selection returns $\mathrm{NONE}$ if a drone exhausts its candidates. A rejected candidate is not permanently marked invalid. Algorithm~\ref{alg:select} expresses this filtering equivalently by excluding all currently reserved targets before maximisation.
+Before choosing, all reached drones' cells are reserved. Each active drone excludes out-of-grid and obstacle targets, then takes its highest-UCB candidate. If its intended target is reserved, it rejects that candidate and tries another. Accepted targets are reserved for later drones. A rejected candidate is not permanently marked invalid. Algorithm~\ref{alg:select} expresses this filtering equivalently by excluding all currently reserved targets before maximisation.
 
 \begin{algorithm}[H]
 \small
@@ -280,150 +280,13 @@ $a\leftarrow\textsc{GreedyAction}(s)$\;
 \textsc{BestAction} assembles a move sequentially using only tried per-drone actions ($N_v(i,u)>0$), maximising $Q_v(i,u)$ with uniform random tie breaking and the same target reservations. The resulting combination need not have been simulated jointly. If this assembly fails, the planner returns the most recently simulated root action; if there is none, it tries the greedy policy. Failure of that final policy raises an error, even though a different earlier assignment might have been feasible. Deadline checks occur between operations, so the budget is a stopping target rather than a strict bound on execution time.
 
 \paragraph{Practical limits.}
-Reservations prevent duplicate \emph{intended} endpoints and intended obstacle entries. They do not guarantee collision-free stochastic outcomes or check edge swaps and crossing paths. Fixed drone order can favour earlier drones, and the shared team return gives only coarse credit assignment. The UCB bonus has a fixed scale while $Q$ uses unnormalised discounted team rewards; consequently large reward differences can dominate exploration among tried actions. These are properties of the implementation, not measured improvements over the earlier planner. B4 retains the historical experiment results for that earlier version.
+Reservations prevent duplicate \emph{intended} endpoints and intended obstacle entries. They do not guarantee collision-free stochastic outcomes or check edge swaps and crossing paths. Fixed drone order can favour earlier drones, and the shared team return gives only coarse credit assignment. The UCB bonus has a fixed scale while $Q$ uses unnormalised discounted team rewards; consequently large reward differences can dominate exploration among tried actions. These are properties of the implementation, not measured improvements over the earlier planner.
 
 % ---------------------------------------------------------------------
 \subsection*{B4. Empirical investigation of problem complexity}
 
-\subsubsection*{Experimental setup}
-\begin{itemize}[nosep]
-  \item Hardware / software: Intel Core i5-13450HX (10 cores, 16 threads), 16\,GB RAM, Windows 11, Python 3.14.3, NumPy 2.5, SciPy 1.18.
-  \item Solver: the earlier joint-action MCTS implementation, archived at\newline
-  \nolinkurl{experiments/results/complexity_10runs_8s/planner.py}. The planning budget was 8\,s per step (within the 10\,s limit), with search depth limit $D=\texttt{max\_num\_steps}=100$. These measurements predate the per-drone implementation described in B2.
-  \item MDP parameters (all scenarios): step cost $-1$, collision penalty $-50$, goal reward $100$, $\gamma=0.98$, $\alpha=0.5$, episode limit 100 steps.
-  \item Runs per scenario: $n=10$, with simulator and planner seeds $0,\dots,9$; 360 episodes in total. Episodes were run headless by \texttt{experiments/run\_all.py}, four episodes at a time in separate processes (one per core, BLAS threads pinned to 1). Because the budget is wall-clock time, this costs every scenario a similar fraction of iterations.
-  \item 95\% CIs: $\bar{x} \pm t_{0.975,\,n-1}\, s/\sqrt{n}$ for continuous metrics, and the Wilson score interval for the success rate (a $t$-interval is degenerate when all runs succeed or all fail).
-\end{itemize}
-
-\paragraph{Performance metrics.}
-\begin{itemize}[nosep]
-  \item \textbf{Success rate}: fraction of episodes in which every drone reaches its goal without any collision.
-  \item \textbf{Total discounted reward} $\sum_t \gamma^t r_t$ of the executed trajectory.
-  \item \textbf{Goal fraction}: fraction of drones at their goals when the episode ends (partial progress for $N=4$).
-  \item \textbf{Steps} per episode and the \textbf{termination cause}: collision or the 100-step limit.
-  \item \textbf{Simulations per step}: calls to \texttt{env.simulate} (tree and rollout transitions) per decision, i.e.\ how much search the 8\,s budget buys.
-\end{itemize}
-
-\paragraph{Complexity factors.}
-\begin{itemize}[nosep]
-  \item \textbf{State space}: grid size small $5{\times}5{\times}3$ (75 cells), medium $10{\times}10{\times}5$ (500) and large $20{\times}20{\times}10$ (4000). Start and goal sit on opposite faces ($x=0$ and $x=X-1$) at mid altitude, so the start--goal distance grows with the grid: 4, 9 and 19 cells.
-  \item \textbf{Action space}: 8 actions per drone (\texttt{change\_altitude: false}, XY plane only) or 26 (full 3-D moves), giving $|A|=8^N$ or $26^N$ joint actions.
-  \item \textbf{Clutter}: \emph{sparse} (full-height pillars on 5\% of the XY footprint), \emph{dense} (20\%) and \emph{narrow passage} (a wall across the whole grid at $x=X/2$ with a single one-cell gap in the centre). Pillars are placed with a fixed seed, the start and goal columns are kept free, and a BFS check guarantees that every drone still has a path to its goal. Obstacles span every altitude, so 26-action drones cannot simply fly over them and both action settings face the same layout.
-  \item \textbf{Number of drones} $N\in\{1,4\}$ is crossed with every factor. Since $|S|\approx(\text{cells})^N$ and $|A|=m^N$, $N$ scales both spaces exponentially; reporting each factor separately for $N=1$ and $N=4$ shows whether its effect is amplified in the joint problem.
-\end{itemize}
-The full factorial contains $3\times2\times3\times2=36$ scenarios. Configurations are stored in \nolinkurl{experiments/configs/complexity/} and generated by \nolinkurl{experiments/gen_configs.py}. Names encode the levels, for example \nolinkurl{Smedium_A8_Osparse_n1.yaml}. From this factorial we take three one-factor-at-a-time sets around a common baseline (medium grid, 8 actions, sparse clutter), and we also use it to average each factor over all the others.
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{p{1.6cm}p{4.4cm}p{8.6cm}}
-\toprule
-Set & Varied factor (others fixed) & What we expect to learn \\
-\midrule
-S1--S3 & Grid small / medium / large; 8 actions, sparse clutter & Effect of a larger state space and a longer horizon. The goal reward is more heavily discounted and further beyond what the search can see, so the solver relies more on the greedy rollout. \\
-A1--A2 & 8 vs 26 actions; medium grid, sparse clutter & Effect of the branching factor. With $26^4=456\,976$ joint actions the root cannot even be fully expanded, so UCB never compares all actions. \\
-C1--C3 & Sparse / dense / narrow passage; medium grid, 8 actions & Effect of clutter on collision risk (transition noise grows near obstacles), on the \textsc{Safe} filter and on the straight-line greedy rollout, which can be misled by walls. \\
-Full factorial & All 36 combinations & Average (marginal) effect of each factor over all other settings, and interactions such as clutter $\times$ $N$. \\
-\bottomrule
-\end{tabular}
-\caption{Experiment design. Each set is run for $N=1$ (IDs suffixed -n1) and $N=4$ (-n4).}
-\end{table}
-
-\subsubsection*{Results}
-Table~\ref{tab:b4-sets} reports the one-factor sets and Table~\ref{tab:b4-marginal} averages each factor level over the full factorial (120 or 180 episodes per level); the per-scenario results for all 36 configurations are in Appendix~B. Figure~\ref{fig:b4-sets} plots the sets.
-
-\begin{table}[H]
-\centering
-\scriptsize
-\setlength{\tabcolsep}{3.5pt}
-\begin{tabular}{llcccccc}
-\toprule
-ID & Level & Success [95\% CI] & Disc.\ reward & Goal fraction & Steps & Sims/step & Coll./limit \\
-\midrule
-S1-n1 & small ($5{\times}5{\times}3$) & 1.00 [0.72, 1.00] & $77.2 \pm 7.4$ & $1.00 \pm 0.00$ & $9.0 \pm 3.0$ & $48293 \pm 556$ & 0/0 \\
-S2-n1 & medium ($10{\times}10{\times}5$) & 0.90 [0.60, 0.98] & $36.0 \pm 25.0$ & $0.90 \pm 0.23$ & $22.2 \pm 7.6$ & $35909 \pm 736$ & 1/0 \\
-S3-n1 & large ($20{\times}20{\times}10$) & 0.90 [0.60, 0.98] & $-2.1 \pm 18.1$ & $0.90 \pm 0.23$ & $56.0 \pm 12.6$ & $36063 \pm 2695$ & 1/0 \\
-S1-n4 & small ($5{\times}5{\times}3$) & 0.40 [0.17, 0.69] & $164.4 \pm 115.2$ & $0.68 \pm 0.28$ & $10.9 \pm 5.3$ & $29203 \pm 2323$ & 6/0 \\
-S2-n4 & medium ($10{\times}10{\times}5$) & 0.30 [0.11, 0.60] & $-13.1 \pm 91.5$ & $0.30 \pm 0.35$ & $13.6 \pm 7.9$ & $16464 \pm 837$ & 7/0 \\
-S3-n4 & large ($20{\times}20{\times}10$) & 0.20 [0.06, 0.51] & $-66.4 \pm 48.7$ & $0.20 \pm 0.30$ & $23.3 \pm 12.8$ & $17516 \pm 1679$ & 8/0 \\
-\midrule
-A1-n1 & 8 & 0.90 [0.60, 0.98] & $36.0 \pm 25.0$ & $0.90 \pm 0.23$ & $22.2 \pm 7.6$ & $35909 \pm 736$ & 1/0 \\
-A2-n1 & 26 & 1.00 [0.72, 1.00] & $67.6 \pm 5.1$ & $1.00 \pm 0.00$ & $12.8 \pm 2.2$ & $38853 \pm 5097$ & 0/0 \\
-A1-n4 & 8 & 0.30 [0.11, 0.60] & $-13.1 \pm 91.5$ & $0.30 \pm 0.35$ & $13.6 \pm 7.9$ & $16464 \pm 837$ & 7/0 \\
-A2-n4 & 26 & 0.80 [0.49, 0.94] & $170.6 \pm 91.1$ & $0.80 \pm 0.30$ & $17.5 \pm 4.8$ & $9833 \pm 1058$ & 2/0 \\
-\midrule
-C1-n1 & sparse & 0.90 [0.60, 0.98] & $36.0 \pm 25.0$ & $0.90 \pm 0.23$ & $22.2 \pm 7.6$ & $35909 \pm 736$ & 1/0 \\
-C2-n1 & dense & 0.00 [0.00, 0.28] & $-49.2 \pm 2.2$ & $0.00 \pm 0.00$ & $43.4 \pm 25.6$ & $35197 \pm 1278$ & 8/2 \\
-C3-n1 & narrow & 0.50 [0.24, 0.76] & $-16.8 \pm 24.0$ & $0.50 \pm 0.38$ & $66.2 \pm 19.9$ & $39572 \pm 5418$ & 2/3 \\
-C1-n4 & sparse & 0.30 [0.11, 0.60] & $-13.1 \pm 91.5$ & $0.30 \pm 0.35$ & $13.6 \pm 7.9$ & $16464 \pm 837$ & 7/0 \\
-C2-n4 & dense & 0.00 [0.00, 0.28] & $-85.3 \pm 27.7$ & $0.00 \pm 0.00$ & $5.4 \pm 3.4$ & $15075 \pm 242$ & 10/0 \\
-C3-n4 & narrow & 0.00 [0.00, 0.28] & $-94.4 \pm 33.4$ & $0.05 \pm 0.08$ & $15.8 \pm 7.5$ & $14525 \pm 248$ & 10/0 \\
-\bottomrule
-\end{tabular}
-\caption{One-factor sets, $n=10$ runs each. Continuous metrics are mean $\pm$ 95\% CI half-width; success uses the Wilson interval. ``Coll./limit'' counts episodes ending in a collision / at the 100-step limit. S2, A1 and C1 are the same baseline scenario.}
-\label{tab:b4-sets}
-\end{table}
-
-\begin{table}[H]
-\centering
-\scriptsize
-\setlength{\tabcolsep}{3.5pt}
-\begin{tabular}{llcccccc}
-\toprule
-Factor & Level & Success [95\% CI] & Disc.\ reward & Goal fraction & Steps & Sims/step & Coll./limit \\
-\midrule
-State space & small & 0.49 [0.40, 0.58] & $38.9 \pm 23.7$ & $0.54 \pm 0.09$ & $6.9 \pm 1.4$ & $29987 \pm 2857$ & 61/0 \\
- & medium & 0.41 [0.32, 0.50] & $-11.6 \pm 17.1$ & $0.41 \pm 0.09$ & $24.5 \pm 4.5$ & $24910 \pm 2379$ & 66/5 \\
- & large & 0.22 [0.15, 0.30] & $-58.2 \pm 9.8$ & $0.24 \pm 0.07$ & $37.5 \pm 5.1$ & $24806 \pm 2272$ & 84/10 \\
-\midrule
-Action space & 8 & 0.31 [0.24, 0.38] & $-24.5 \pm 13.6$ & $0.34 \pm 0.07$ & $26.2 \pm 4.3$ & $29829 \pm 1852$ & 112/13 \\
- & 26 & 0.44 [0.37, 0.51] & $3.9 \pm 17.1$ & $0.45 \pm 0.07$ & $19.7 \pm 3.1$ & $23306 \pm 2172$ & 99/2 \\
-\midrule
-Clutter & sparse & 0.68 [0.59, 0.75] & $54.5 \pm 22.4$ & $0.70 \pm 0.08$ & $18.7 \pm 3.0$ & $28439 \pm 2491$ & 39/0 \\
- & dense & 0.17 [0.11, 0.24] & $-41.9 \pm 13.3$ & $0.17 \pm 0.07$ & $16.6 \pm 4.1$ & $25701 \pm 2560$ & 97/3 \\
- & narrow & 0.28 [0.20, 0.36] & $-43.6 \pm 14.8$ & $0.31 \pm 0.08$ & $33.6 \pm 5.7$ & $25563 \pm 2574$ & 75/12 \\
-\midrule
-Drones $N$ & 1 & 0.59 [0.52, 0.66] & $9.7 \pm 8.2$ & $0.59 \pm 0.07$ & $30.7 \pm 4.2$ & $39047 \pm 980$ & 61/13 \\
- & 4 & 0.16 [0.11, 0.22] & $-30.4 \pm 20.1$ & $0.20 \pm 0.05$ & $15.2 \pm 2.7$ & $14088 \pm 935$ & 150/2 \\
-\bottomrule
-\end{tabular}
-\caption{Each factor level averaged over all other factors of the full factorial (120 episodes per level for state space and clutter, 180 for action space and $N$).}
-\label{tab:b4-marginal}
-\end{table}
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=\linewidth]{figures/b4_sets.pdf}
-\caption{One-factor sets for $N=1$ and $N=4$. Top: success rate with Wilson 95\% CI. Bottom: mean discounted reward with $t$-based 95\% CI. Points for $N=4$ are shifted slightly to the right for readability.}
-\label{fig:b4-sets}
-\end{figure}
-
-\subsubsection*{Discussion}
-\paragraph{Effect of state-space size.} Growing the grid lowers performance steadily but gradually. For one drone, success stays at 0.90--1.00 (S1--S3), but the discounted reward drops from 77 to $-2$: the goal is 19 cells away instead of 4, so the $+100$ is discounted by $0.98^{56}\approx0.32$ and the drone pays more step costs and noise detours on the way (56 steps on average versus a straight-line distance of 19). For four drones, success falls from 0.40 to 0.20. Averaged over the full factorial, success falls from 0.49 to 0.22 and the CIs of small and large do not overlap. The 100-step limit appears only on medium and large grids (5 and 10 episodes), which shows that the horizon becomes too long for the search.
-
-\paragraph{Effect of action-space size.} The branching factor does not degrade performance; 26 actions per drone is \emph{better} on average (success 0.44 vs 0.31, CIs only just overlapping; reward $3.9$ vs $-24.5$). With one drone, vertical and diagonal moves shorten paths (12.8 vs 22.2 steps in A1/A2) and give more ways around pillars. With four drones the gain is larger in the baseline (A2-n4 0.80 vs A1-n4 0.30): altitude changes let drones separate vertically, and the number of four-drone episodes with a drone-to-drone collision halves (11 with 26 actions vs 23 with 8). The cost of the larger space appears in the search statistics instead: each new node allocates statistics for $26^4=456\,976$ actions, so with $N=4$ the solver reaches only 5\,000--13\,000 simulations per step with 26 actions versus 14\,500--29\,000 with 8. With 8 actions, the $8^4=4\,096$ root actions are of the same order as the budget, so the root can come close to trying them all. With 26 actions it cannot: the root stays in the untried-action phase, and the planner chooses among randomly sampled \textsc{Safe} joint actions, each judged by one or very few rollouts. This shows up in the large sparse grid, where 26 actions gives 0/10 against 2/10 with 8. The sampled joint actions are good enough to outweigh the thinner search in most scenarios, though not the large one.
-
-\paragraph{Effect of clutter.} Clutter is the factor that degrades performance the most. Going from sparse to dense clutter cuts the single-drone success from 0.90 to 0.00 (C1 vs C2, non-overlapping CIs), and in the full factorial from 0.68 to 0.17 (dense) and 0.28 (narrow). Two mechanisms are visible in the termination causes:
-\begin{itemize}[nosep]
-  \item \textbf{Dense clutter causes collisions.} The success probability $d/(d+\alpha)$ is only $0.67$ next to an obstacle, so every step along a pillar carries a real chance of slipping into it. \textsc{Safe} rejects any action whose \emph{intended} cell is blocked, but it cannot prevent such slips, and dense clutter leaves no path that stays far from the pillars. Of the 100 failed dense episodes, 97 ended in a collision and only 3 at the step limit. For one drone on the medium and large dense grids with 8 actions, none of the 20 runs succeeded.
-  \item \textbf{Narrow passage makes the solver stall.} 12 of the 15 step-limit episodes in the whole study are narrow-passage scenarios. In these episodes the single drone wanders on the start side, revisiting a single cell 5--16 times; on the medium grid it never gets closer than two cells to the wall, and on the large grid only one of the five stalled runs ever passed it. Every cell next to the wall is risky, the greedy rollout (straight-line distance) has no notion of having to line up with the gap, and under a $-50$ collision penalty the tree's estimates make hovering at $-1$ per step look better than approaching the wall.
-\end{itemize}
-
-\paragraph{Number of drones.} $N$ is not one of the three factors asked for, but because it multiplies both spaces it interacts strongly with all of them. Moving from one to four drones drops the average success from 0.59 to 0.16 and leaves 14\,088 instead of 39\,047 simulations per step. With four drones, 55 of the 60 dense or narrow episodes failed, mostly within about 16 steps (50--57 on the large narrow grid): the drones start in neighbouring lanes, and with four independent noisy moves per step the chance that at least one slips into an obstacle or another drone is several times higher. 34 episodes involved a drone-to-drone collision, which can only happen with $N=4$.
-
-\paragraph{Which factor degrades performance the most?} Ranking the factors by the drop in success over their range in the full factorial: \textbf{clutter} ($0.68\rightarrow0.17$, a 75\% relative drop, non-overlapping CIs) $>$ \textbf{state-space size} ($0.49\rightarrow0.22$, 56\%, non-overlapping CIs) $\gg$ \textbf{action-space size} ($0.31\rightarrow0.44$, an improvement). The one-factor sets confirm this ordering: from the same baseline, dense clutter costs 90 percentage points of single-drone success and the narrow passage 40, a larger grid costs nothing (0.90 for medium and large), and 26 actions gains 10. The discounted reward falls by about the same amount over the state-space range ($-97$) as over the clutter range ($-96$ to $-98$), because larger grids also lower the reward of \emph{successful} episodes through discounting. In terms of whether the drones arrive at all, clutter is clearly the most damaging factor.
-
-\paragraph{Role of each solver component as complexity grows.}
-\begin{itemize}[nosep]
-  \item \textbf{Selection (UCB) and expansion.} With one drone, the 8\,s budget gives about 33\,000--50\,000 simulations per step, enough for the root to try every action and for UCB to rank them. With four drones, the simulations per step (5\,000--29\,000) are close to $8^4$ and far below $26^4$, so with 26 actions selection stays in the ``untried action'' phase at the root and the tree is mostly one level deep. Expansion also stores every distinct stochastic outcome as its own child, so even repeated actions rarely revisit a node, and there are few backed-up statistics deeper in the tree. This is why the solver's quality drops sharply with $N$ but not with the per-drone action count.
-  \item \textbf{\textsc{Safe} filter and greedy fallback.} The filter is what makes the solver usable in clutter at all: in all 8\,269 executed steps, no chosen joint action had a drone aimed at an obstacle cell or two drones aimed at the same cell. It also prunes the root sampling to legal joint actions. Its limitation grows with clutter: it reasons only about intended endpoints, not about the $1-p_{\text{succ}}$ slip mass, which is concentrated exactly where clutter is dense. All collisions in the study are such stochastic slips.
-  \item \textbf{Greedy rollout.} The distance-to-goal rollout gives informative value estimates in open space (sparse clutter, $N=1$: 0.90--1.00 success up to the large grid), which explains why state-space size hurts gradually rather than sharply. It is the weakest component in a narrow passage: straight-line distance points into the wall, so rollouts from most states end in a collision or a detour and the tree learns to stay away from the wall instead of moving towards the gap. This produces most of the step-limit episodes.
-  \item \textbf{Backpropagation and discounting.} With $\gamma=0.98$, a goal 40--50 steps away is worth $<0.45$ of its face value. On large grids the backed-up value of moving towards the goal is therefore small compared with the immediate $-50$ risk of a collision, which makes the search risk-averse. This helps in sparse clutter (few collisions) but contributes to stalling when every route passes close to obstacles.
-\end{itemize}
-
-\paragraph{Effect of the planning budget.} A pilot run of the same 360 episodes with a 1\,s budget gave the same ranking (clutter $>$ state space $>$ action space). Raising the budget to 8\,s gave about eight times as many simulations per step, and average success rose only from 0.33 to 0.37. The gains are where the problem is limited by search: narrow passage (0.18 to 0.28), four drones (0.11 to 0.16) and 26 actions (0.36 to 0.44). Dense clutter did not improve at all (0.17 in both). More search lets the solver find the gap or a joint action that avoids the other drones, but it cannot remove the collision risk of moving next to obstacles, which the current \textsc{Safe} check and rollout do not model.
-
-\paragraph{Limitations and possible improvements.} Ten runs per scenario give wide intervals (a Wilson interval at $p=0.5$ spans about $\pm0.3$), so differences of $\le0.2$ in success between neighbouring levels are not statistically resolved; the full-factorial averages over 120--180 episodes are much tighter. The historical results suggest three targeted improvements to the evaluated joint-action solver: (i) make \textsc{Safe} and the rollout risk-aware by penalising targets with a small obstacle distance $d$, since $1-p_{\text{succ}}$ grows next to obstacles; (ii) replace the straight-line rollout heuristic with a precomputed shortest-path (BFS) distance around obstacles, which would point drones at the gap in a narrow passage; and (iii) for $N>1$, factor the root search per drone (or widen it progressively) so that the budget is not spread over $m^N$ joint actions. Per-drone action statistics are now implemented in B2, but their effect has not been remeasured in these experiments.
+% To be populated after rerunning experiments with the current planner.py.
+% Experimental setup, results and discussion are intentionally empty.
 
 % =====================================================================
 \appendix
@@ -440,64 +303,8 @@ Tools used: \todo{tool names and versions, or ``None''}.
 \end{enumerate}
 
 \section*{Appendix B: Additional results}
-Table~\ref{tab:b4-full} lists all 36 scenarios of the full factorial ($n=10$ runs each, seeds 0--9). Raw per-run data, trajectories and the planner snapshot are in \texttt{experiments/results/complexity\_10runs\_8s/}; \texttt{experiments/analyze.py} regenerates the tables and figures.
 
-\begin{table}[H]
-\centering
-\scriptsize
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{cccccccccc}
-\toprule
-$N$ & Clutter & Actions & Grid & Success [95\% CI] & Disc.\ reward & Goal fraction & Steps & Sims/step & Coll./limit \\
-\midrule
-1 & sparse & 8 & small & 1.00 [0.72, 1.00] & $77.2 \pm 7.4$ & $1.00 \pm 0.00$ & $9.0 \pm 3.0$ & $48293 \pm 556$ & 0/0 \\
-1 & sparse & 8 & medium & 0.90 [0.60, 0.98] & $36.0 \pm 25.0$ & $0.90 \pm 0.23$ & $22.2 \pm 7.6$ & $35909 \pm 736$ & 1/0 \\
-1 & sparse & 8 & large & 0.90 [0.60, 0.98] & $-2.1 \pm 18.1$ & $0.90 \pm 0.23$ & $56.0 \pm 12.6$ & $36063 \pm 2695$ & 1/0 \\
-1 & sparse & 26 & small & 1.00 [0.72, 1.00] & $83.7 \pm 3.2$ & $1.00 \pm 0.00$ & $6.4 \pm 1.2$ & $45005 \pm 2447$ & 0/0 \\
-1 & sparse & 26 & medium & 1.00 [0.72, 1.00] & $67.6 \pm 5.1$ & $1.00 \pm 0.00$ & $12.8 \pm 2.2$ & $38853 \pm 5097$ & 0/0 \\
-1 & sparse & 26 & large & 1.00 [0.72, 1.00] & $34.6 \pm 6.6$ & $1.00 \pm 0.00$ & $29.3 \pm 3.8$ & $39642 \pm 2844$ & 0/0 \\
-1 & dense & 8 & small & 0.50 [0.24, 0.76] & $14.8 \pm 49.5$ & $0.50 \pm 0.38$ & $6.6 \pm 2.6$ & $49915 \pm 1342$ & 5/0 \\
-1 & dense & 8 & medium & 0.00 [0.00, 0.28] & $-49.2 \pm 2.2$ & $0.00 \pm 0.00$ & $43.4 \pm 25.6$ & $35197 \pm 1278$ & 8/2 \\
-1 & dense & 8 & large & 0.00 [0.00, 0.28] & $-49.8 \pm 1.6$ & $0.00 \pm 0.00$ & $46.4 \pm 21.6$ & $35394 \pm 2645$ & 9/1 \\
-1 & dense & 26 & small & 0.80 [0.49, 0.94] & $50.2 \pm 39.0$ & $0.80 \pm 0.30$ & $8.3 \pm 4.1$ & $33455 \pm 906$ & 2/0 \\
-1 & dense & 26 & medium & 0.50 [0.24, 0.76] & $-13.7 \pm 31.7$ & $0.50 \pm 0.38$ & $31.1 \pm 19.4$ & $38209 \pm 4993$ & 5/0 \\
-1 & dense & 26 & large & 0.00 [0.00, 0.28] & $-50.6 \pm 0.2$ & $0.00 \pm 0.00$ & $33.3 \pm 15.5$ & $36810 \pm 3782$ & 10/0 \\
-1 & narrow & 8 & small & 0.50 [0.24, 0.76] & $15.2 \pm 50.1$ & $0.50 \pm 0.38$ & $8.3 \pm 3.0$ & $49582 \pm 1334$ & 5/0 \\
-1 & narrow & 8 & medium & 0.50 [0.24, 0.76] & $-16.8 \pm 24.0$ & $0.50 \pm 0.38$ & $66.2 \pm 19.9$ & $39572 \pm 5418$ & 2/3 \\
-1 & narrow & 8 & large & 0.20 [0.06, 0.51] & $-36.2 \pm 16.8$ & $0.20 \pm 0.30$ & $69.8 \pm 25.2$ & $36827 \pm 2711$ & 3/5 \\
-1 & narrow & 26 & small & 0.70 [0.40, 0.89] & $42.5 \pm 46.3$ & $0.70 \pm 0.35$ & $6.4 \pm 1.9$ & $33458 \pm 1343$ & 3/0 \\
-1 & narrow & 26 & medium & 0.80 [0.49, 0.94] & $1.5 \pm 26.7$ & $0.80 \pm 0.30$ & $43.7 \pm 18.6$ & $35768 \pm 3133$ & 2/0 \\
-1 & narrow & 26 & large & 0.30 [0.11, 0.60] & $-30.4 \pm 22.4$ & $0.30 \pm 0.35$ & $53.4 \pm 19.4$ & $34902 \pm 4370$ & 5/2 \\
-\midrule
-4 & sparse & 8 & small & 0.40 [0.17, 0.69] & $164.4 \pm 115.2$ & $0.68 \pm 0.28$ & $10.9 \pm 5.3$ & $29203 \pm 2323$ & 6/0 \\
-4 & sparse & 8 & medium & 0.30 [0.11, 0.60] & $-13.1 \pm 91.5$ & $0.30 \pm 0.35$ & $13.6 \pm 7.9$ & $16464 \pm 837$ & 7/0 \\
-4 & sparse & 8 & large & 0.20 [0.06, 0.51] & $-66.4 \pm 48.7$ & $0.20 \pm 0.30$ & $23.3 \pm 12.8$ & $17516 \pm 1679$ & 8/0 \\
-4 & sparse & 26 & small & 0.60 [0.31, 0.83] & $191.5 \pm 138.9$ & $0.68 \pm 0.32$ & $5.9 \pm 1.9$ & $11476 \pm 787$ & 4/0 \\
-4 & sparse & 26 & medium & 0.80 [0.49, 0.94] & $170.6 \pm 91.1$ & $0.80 \pm 0.30$ & $17.5 \pm 4.8$ & $9833 \pm 1058$ & 2/0 \\
-4 & sparse & 26 & large & 0.00 [0.00, 0.28] & $-90.0 \pm 23.5$ & $0.00 \pm 0.00$ & $17.1 \pm 11.0$ & $13011 \pm 1720$ & 10/0 \\
-4 & dense & 8 & small & 0.00 [0.00, 0.28] & $-105.1 \pm 28.4$ & $0.00 \pm 0.00$ & $1.4 \pm 0.7$ & $25271 \pm 411$ & 10/0 \\
-4 & dense & 8 & medium & 0.00 [0.00, 0.28] & $-85.3 \pm 27.7$ & $0.00 \pm 0.00$ & $5.4 \pm 3.4$ & $15075 \pm 242$ & 10/0 \\
-4 & dense & 8 & large & 0.00 [0.00, 0.28] & $-66.0 \pm 4.5$ & $0.00 \pm 0.00$ & $5.3 \pm 1.7$ & $15668 \pm 160$ & 10/0 \\
-4 & dense & 26 & small & 0.20 [0.06, 0.51] & $-3.8 \pm 128.9$ & $0.20 \pm 0.30$ & $3.1 \pm 2.1$ & $5242 \pm 406$ & 8/0 \\
-4 & dense & 26 & medium & 0.00 [0.00, 0.28] & $-70.7 \pm 21.5$ & $0.03 \pm 0.06$ & $6.9 \pm 3.5$ & $10177 \pm 360$ & 10/0 \\
-4 & dense & 26 & large & 0.00 [0.00, 0.28] & $-73.4 \pm 8.9$ & $0.00 \pm 0.00$ & $8.3 \pm 3.6$ & $7998 \pm 279$ & 10/0 \\
-4 & narrow & 8 & small & 0.10 [0.02, 0.40] & $-28.4 \pm 65.7$ & $0.23 \pm 0.26$ & $12.4 \pm 15.5$ & $21860 \pm 1817$ & 9/0 \\
-4 & narrow & 8 & medium & 0.00 [0.00, 0.28] & $-94.4 \pm 33.4$ & $0.05 \pm 0.08$ & $15.8 \pm 7.5$ & $14525 \pm 248$ & 10/0 \\
-4 & narrow & 8 & large & 0.00 [0.00, 0.28] & $-136.4 \pm 19.8$ & $0.15 \pm 0.15$ & $56.5 \pm 19.4$ & $14593 \pm 1125$ & 8/2 \\
-4 & narrow & 26 & small & 0.10 [0.02, 0.40] & $-35.6 \pm 101.5$ & $0.15 \pm 0.24$ & $4.4 \pm 2.5$ & $7082 \pm 157$ & 9/0 \\
-4 & narrow & 26 & medium & 0.10 [0.02, 0.40] & $-72.2 \pm 52.1$ & $0.10 \pm 0.23$ & $15.7 \pm 6.3$ & $9336 \pm 824$ & 9/0 \\
-4 & narrow & 26 & large & 0.00 [0.00, 0.28] & $-132.3 \pm 19.4$ & $0.07 \pm 0.09$ & $50.8 \pm 12.5$ & $9249 \pm 1113$ & 10/0 \\
-\bottomrule
-\end{tabular}
-\caption{Full factorial results (mean $\pm$ 95\% CI half-width; Wilson interval for success).}
-\label{tab:b4-full}
-\end{table}
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=\linewidth]{figures/b4_marginals.pdf}
-\caption{Success rate per factor level, averaged over the full factorial (Wilson 95\% CI).}
-\end{figure}
+% Tables and figures will be added from the new B4 experiment batch.
 
 % \section*{References}
 % \begin{thebibliography}{9}
