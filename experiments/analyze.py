@@ -18,7 +18,7 @@ from scipy import stats
 ROOT = Path(__file__).resolve().parents[1]
 STATES = ['small', 'medium', 'large']
 ACTIONS = ['8', '26']
-OBSTACLES = ['sparse', 'dense', 'narrow']
+OBSTACLES = ['sparse', 'dense']
 DRONES = ['1', '4']
 
 # One-factor-at-a-time sets, all drawn from the full factorial.
@@ -149,8 +149,8 @@ def main():
                 for obstacles in OBSTACLES for drones in DRONES}
     present = {(row.get('state'), row.get('actions'), row.get('obstacles'), row.get('drones'))
                for row in rows}
-    if not expected.issubset(present):
-        parser.error('analysis requires all 36 complexity scenarios; for custom/Mukhit configs, '
+    if present != expected:
+        parser.error('analysis requires exactly the 24 sparse/dense complexity scenarios; for custom/Mukhit configs, '
                      'use summary_by_environment.csv from run_all.py')
     fig_dir = args.figures_dir
     fig_dir.mkdir(parents=True, exist_ok=True)

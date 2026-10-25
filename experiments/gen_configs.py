@@ -3,10 +3,10 @@
 Factors:
     state space : small (5x5x3), medium (10x10x5), large (20x20x10)
     action space: 8 (change_altitude=False), 26 (change_altitude=True)
-    obstacles   : sparse clutter, dense clutter, narrow passage
+    obstacles   : sparse clutter, dense clutter
     drones      : 1, 4
 
-Obstacles are full-height pillars/walls (span every z level), so the same
+Obstacles are full-height pillars (span every z level), so the same
 layout blocks both the 8-action and the 26-action drones; flying over an
 obstacle is never a shortcut. Clutter layouts use a fixed seed per grid size,
 so the 8- and 26-action configs of the same size share identical obstacles.
@@ -96,15 +96,6 @@ def clutter_footprint(grid, density, rng):
     raise RuntimeError(f"no feasible clutter layout for grid {grid}, density {density}")
 
 
-def narrow_footprint(grid):
-    """Single wall at x=X//2 with a 1-cell gap at the centre of the y axis."""
-    X, Y, _ = grid
-    blocked = np.zeros((X, Y), dtype=bool)
-    blocked[X // 2, :] = True
-    blocked[X // 2, Y // 2] = False
-    return blocked
-
-
 def to_cells(blocked_xy, Z):
     xs, ys = np.nonzero(blocked_xy)
     return [[int(x), int(y), int(z)] for x, y in zip(xs, ys) for z in range(Z)]
@@ -113,7 +104,7 @@ def to_cells(blocked_xy, Z):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=OUT_DIR,
-                        help='Directory for the 36 generated YAML configs')
+                        help='Directory for the 24 generated YAML configs')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -122,11 +113,10 @@ def main():
         rng = np.random.default_rng(SEED)
         for name, dens in CLUTTER_DENSITY.items():
             footprints[size, name] = clutter_footprint(grid, dens, rng)
-        footprints[size, "narrow"] = narrow_footprint(grid)
 
     count = 0
     for (size, grid), (n_act, alt), obs, n in itertools.product(
-            GRIDS.items(), ACTIONS.items(), ["sparse", "dense", "narrow"], NUM_DRONES):
+            GRIDS.items(), ACTIONS.items(), CLUTTER_DENSITY, NUM_DRONES):
         starts, goals = starts_goals(grid, n)
         cfg = dict(
             grid_size=list(grid),
