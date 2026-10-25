@@ -149,7 +149,7 @@ Sensors give both positions, but not where the pedestrian is going. At each step
       100, & \text{if drone $i$ reaches its goal}.
     \end{cases}
   \]
-  \item \textbf{Discount factor} $\gamma$: \todo{e.g.\ 0.99}
+  \item \textbf{Discount factor} $\gamma$: 0.98
 \end{itemize}
 
 % ---------------------------------------------------------------------
@@ -289,26 +289,142 @@ Reservations prevent duplicate \emph{intended} endpoints and intended obstacle e
 % ---------------------------------------------------------------------
 \subsection*{B4. Empirical investigation of problem complexity}
 
-% To be populated after rerunning experiments with the current planner.py.
-% Experimental setup, results and discussion are intentionally empty.
+\subsubsection*{Experimental setup}
+The experiment uses the per-drone MCTS planner described in B2, with 24 configurations and 10 episodes per configuration (seeds 0--9), giving 240 episodes. The batch was run a planning budget of 8\,s per real step. The episode limit and per-iteration search horizon were both 100 steps. Total batch duration was 461.84 minutes (approximately 7 hours 42 minutes).
+
+All configurations used step cost $-1$, collision penalty $-50$, goal reward $100$, discount factor $\gamma=0.98$ and transition-noise parameter $\alpha=0.5$. Rewards are summed over drones, as in the simulator; reported discounted rewards are team returns.
+
+\paragraph{Configuration design.}
+The 24 configurations combine:
+\begin{itemize}[nosep]
+  \item Grid: small $5\times5\times3$, medium $10\times10\times5$, or large $20\times20\times10$.
+  \item Actions per drone: 8 (fixed altitude) or 26 (altitude changes enabled).
+  \item Clutter: sparse (2\%) or dense (10\%) XY coverage by full-height pillars.
+  \item Drones: 1 or 4.
+\end{itemize}
+Each grid/clutter layout is shared across action settings and drone counts. Starts and goals lie on opposite $x$ faces at mid altitude, with individual reachability checked by the generator.
+
+\paragraph{Metrics and statistical summaries.}
+Success means all drones reach their goals without collision. Metrics are discounted team reward $\sum_t\gamma^t r_t$, final goal fraction, executed steps, termination cause, and simulations per step (tree-search and rollout calls to \texttt{env.simulate}, averaged per episode). Continuous metrics use mean $\pm$ Student-$t$ 95\% confidence-interval half-widths; success rates use Wilson 95\% intervals. Marginal summaries pool episodes across the other factors.
+
+\subsubsection*{Results}
+Across the full batch, 133 of 240 episodes succeeded (55.4\%), 106 ended in collision and one reached the 100-step limit. The recorded trajectories contain 3\,462 executed steps.
+
+Table~\ref{tab:b4-marginal} gives marginal summaries over the full factorial. The full 24-configuration table and a plot of marginal success rates are provided in Appendix~B.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{llcccccc}
+\toprule
+Factor & Level & Success [95\% CI] & Disc.\ reward & Goal fraction & Steps & Sims/step & Coll./limit \\
+\midrule
+State space & small & 0.64 [0.53, 0.73] & $68.9 \pm 25.1$ & $0.69 \pm 0.10$ & $9.1 \pm 1.3$ & $42006 \pm 2645$ & 29/0 \\
+State space & medium & 0.66 [0.55, 0.76] & $40.1 \pm 17.5$ & $0.69 \pm 0.10$ & $15.9 \pm 3.2$ & $43267 \pm 3058$ & 27/0 \\
+State space & large & 0.36 [0.27, 0.47] & $-34.1 \pm 11.9$ & $0.37 \pm 0.11$ & $18.2 \pm 4.6$ & $37283 \pm 2797$ & 50/1 \\
+\midrule
+Actions & 8 & 0.49 [0.40, 0.58] & $6.7 \pm 16.1$ & $0.51 \pm 0.09$ & $14.4 \pm 3.0$ & $43840 \pm 2187$ & 60/1 \\
+Actions & 26 & 0.62 [0.53, 0.70] & $43.3 \pm 17.7$ & $0.65 \pm 0.08$ & $14.4 \pm 2.5$ & $37864 \pm 2377$ & 46/0 \\
+\midrule
+Clutter & sparse & 0.73 [0.65, 0.80] & $57.5 \pm 18.6$ & $0.76 \pm 0.07$ & $19.0 \pm 3.0$ & $42107 \pm 2329$ & 31/1 \\
+Clutter & dense & 0.38 [0.29, 0.46] & $-7.5 \pm 13.4$ & $0.41 \pm 0.09$ & $9.9 \pm 2.3$ & $39597 \pm 2344$ & 75/0 \\
+\midrule
+Drones & 1 & 0.83 [0.76, 0.89] & $45.3 \pm 8.6$ & $0.83 \pm 0.07$ & $13.2 \pm 2.2$ & $51886 \pm 1284$ & 20/0 \\
+Drones & 4 & 0.28 [0.20, 0.36] & $4.7 \pm 22.2$ & $0.33 \pm 0.08$ & $15.6 \pm 3.2$ & $29818 \pm 1162$ & 86/1 \\
+\bottomrule
+\end{tabular}
+\caption{Marginal summaries over all other factors. Each grid level pools 80 episodes; each action, clutter or drone-count level pools 120. Continuous values are mean $\pm$ 95\% CI half-width; success uses the Wilson interval.}
+\label{tab:b4-marginal}
+\end{table}
+
+\paragraph{Analysis.}
+Small and medium grids had similar success rates (64\% and 66\%), but the rate dropped to 36\% on the large grid. The main decrease therefore occurred on the largest grid. Of its 50 collision episodes, 49 involved obstacles and only one involved a collision between drones. Most failures on the large grid were therefore caused by obstacle collisions.
+
+Dense clutter had a lower success rate than sparse clutter (38\% versus 73\%) and more collision episodes (75 versus 31). More obstacles may limit safe movement and make navigation harder within the available planning time. Episodes with dense clutter also had fewer steps on average (9.9 versus 19.0). However, this may be because collisions ended episodes earlier, rather than because the drones found more efficient routes.
+
+Using 26 actions per drone gave a higher success rate than using 8 actions (62\% versus 49\%). Although more actions increase the search cost, the extra movement options may help drones find safe routes and avoid conflicts. This is a possible explanation, but the results do not confirm the cause of the improvement.
+
+Increasing the number of drones from one to four reduced the success rate from 83\% to 28\%. The planner selects actions per drone, so it does not need to try every combination of actions. However, the drones still share a joint state and need to coordinate their movements. The lower success rate suggests that this coordination becomes more difficult with four drones under the same 8\,s planning budget.
 
 % =====================================================================
 \appendix
 \section*{Appendix A: Generative AI disclosure}
 % Required by the assignment: failure to disclose = cheating.
-Tools used: \todo{tool names and versions, or ``None''}.
+Tools used: Claude Code and Codex.
 
-\noindent What they were used for: \todo{}
+\noindent What they were used for:
+\begin{itemize}[nosep]
+  \item Asking questions to understand concepts, e.g.\ $\alpha$-vector pruning, MDP versus POMDP modelling, MCTS and UCB, RTDP, discount factors and confidence intervals.
+  \item Exchanging ideas and comparing design options for the planner, e.g.\ joint versus per-drone action statistics, rollout policies, depth limits and progressive widening.
+  \item Implementing and debugging \texttt{planner.py} step by step from my own instructions and comments.
+  \item Running the experiments and summarising their statistics.
+  \item Drafting, shortening and formatting parts of this report in \LaTeX, and checking my answers.
+\end{itemize}
 
-\noindent Full list of prompts:
-\begin{enumerate}[label=\arabic*.]
-  \item \todo{prompt 1 (verbatim)}
-  \item \todo{prompt 2 (verbatim)}
+\noindent Selected prompt and response examples are given below. Prompts are shortened English translations or paraphrases; responses are summaries, not direct quotations. A longer prompt log is included in the submitted zip as \texttt{report/ai\_prompts.md}.
+
+\begin{enumerate}[itemsep=0.5em]
+  \item \textbf{Concept clarification (Claude Code).}\\
+  \textbf{Prompt:} Abstracting the state into left and right does not make this an MDP, because the true state is still uncertain.\\
+  \textbf{Response summary:} Reworded the explanation: grouping states does not remove uncertainty. A belief is still needed, so the problem remains a POMDP.
+
+  \item \textbf{Selection design (Codex).}\\
+  \textbf{Prompt:} Use UCB per drone, with tie breaking for equal scores. Combine actions in order and replace a candidate if two drones would reach the same state.\\
+  \textbf{Response summary:} Restated the proposed design using per-drone visit counts and mean returns, infinite UCB for untried actions, and sequential action selection. Asked for clarification about which conflicts should be rejected.
+
+  \item \textbf{Rollout implementation (Codex).}\\
+  \textbf{Prompt:} The greedy rollout should still choose actions per drone and then combine them.\\
+  \textbf{Response summary:} Implemented sequential choices towards each drone's goal while avoiding already reserved targets, combined the actions, and accumulated discounted rewards from simulation.
+
+  \item \textbf{Report editing (Codex).}\\
+  \textbf{Prompt:} Help polish my analysis. Explain possible additions and ask me before including them.\\
+  \textbf{Response summary:} Improved the English, corrected unsupported claims about statistical significance and collision types, and asked whether to add possible explanations. Added only the points I approved.
 \end{enumerate}
 
 \section*{Appendix B: Additional results}
 
-% Tables and figures will be added from the new B4 experiment batch.
+Table~\ref{tab:b4-full} lists all 24 configurations, each with 10 runs and seeds 0--9. Raw CSV files, trajectories, metadata, validation checks and the planner snapshot are stored in:
+\par\noindent\nolinkurl{experiments/results/b4_reduced_obstacles_8s/}.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.8pt}
+\begin{tabular}{llclcccccc}
+\toprule
+$N$ & Clutter & Actions & Grid & Success [95\% CI] & Disc.\ reward & Goal fraction & Steps & Sims/step & Coll./limit \\
+\midrule
+1 & sparse & 8 & small & 0.90 [0.60, 0.98] & $59.0 \pm 30.0$ & $0.90 \pm 0.23$ & $11.1 \pm 5.1$ & $55714 \pm 4156$ & 1/0 \\
+1 & sparse & 8 & medium & 1.00 [0.72, 1.00] & $72.3 \pm 2.3$ & $1.00 \pm 0.00$ & $10.8 \pm 0.9$ & $62039 \pm 586$ & 0/0 \\
+1 & sparse & 8 & large & 0.90 [0.60, 0.98] & $32.8 \pm 21.8$ & $0.90 \pm 0.23$ & $22.9 \pm 5.6$ & $50940 \pm 5303$ & 1/0 \\
+1 & sparse & 26 & small & 1.00 [0.72, 1.00] & $79.1 \pm 6.2$ & $1.00 \pm 0.00$ & $8.2 \pm 2.5$ & $58278 \pm 864$ & 0/0 \\
+1 & sparse & 26 & medium & 1.00 [0.72, 1.00] & $73.5 \pm 2.9$ & $1.00 \pm 0.00$ & $10.3 \pm 1.2$ & $48780 \pm 1220$ & 0/0 \\
+1 & sparse & 26 & large & 0.90 [0.60, 0.98] & $37.7 \pm 22.4$ & $0.90 \pm 0.23$ & $20.3 \pm 4.1$ & $41236 \pm 3498$ & 1/0 \\
+1 & dense & 8 & small & 0.90 [0.60, 0.98] & $67.1 \pm 30.3$ & $0.90 \pm 0.23$ & $7.3 \pm 2.6$ & $45036 \pm 964$ & 1/0 \\
+1 & dense & 8 & medium & 0.80 [0.49, 0.94] & $42.9 \pm 35.9$ & $0.80 \pm 0.30$ & $10.9 \pm 4.6$ & $60715 \pm 577$ & 2/0 \\
+1 & dense & 8 & large & 0.20 [0.06, 0.51] & $-43.7 \pm 11.3$ & $0.20 \pm 0.30$ & $17.2 \pm 21.9$ & $51822 \pm 2427$ & 8/0 \\
+1 & dense & 26 & small & 1.00 [0.72, 1.00] & $84.0 \pm 3.6$ & $1.00 \pm 0.00$ & $6.3 \pm 1.4$ & $49596 \pm 903$ & 0/0 \\
+1 & dense & 26 & medium & 0.80 [0.49, 0.94] & $44.2 \pm 36.1$ & $0.80 \pm 0.30$ & $10.3 \pm 3.9$ & $50852 \pm 4681$ & 2/0 \\
+1 & dense & 26 & large & 0.60 [0.31, 0.83] & $-5.8 \pm 28.6$ & $0.60 \pm 0.37$ & $23.0 \pm 12.8$ & $47627 \pm 2353$ & 4/0 \\
+\midrule
+4 & sparse & 8 & small & 0.50 [0.24, 0.76] & $82.7 \pm 114.8$ & $0.53 \pm 0.36$ & $14.0 \pm 7.4$ & $36941 \pm 2704$ & 5/0 \\
+4 & sparse & 8 & medium & 0.60 [0.31, 0.83] & $36.7 \pm 60.5$ & $0.75 \pm 0.25$ & $39.7 \pm 12.8$ & $32942 \pm 3246$ & 4/0 \\
+4 & sparse & 8 & large & 0.00 [0.00, 0.28] & $-96.2 \pm 18.6$ & $0.05 \pm 0.11$ & $23.0 \pm 20.7$ & $34228 \pm 2008$ & 9/1 \\
+4 & sparse & 26 & small & 0.70 [0.40, 0.89] & $211.5 \pm 101.9$ & $0.78 \pm 0.27$ & $11.6 \pm 2.5$ & $30280 \pm 4074$ & 3/0 \\
+4 & sparse & 26 & medium & 1.00 [0.72, 1.00] & $156.7 \pm 22.5$ & $1.00 \pm 0.00$ & $31.0 \pm 3.2$ & $29708 \pm 4797$ & 0/0 \\
+4 & sparse & 26 & large & 0.30 [0.11, 0.60] & $-56.4 \pm 20.4$ & $0.30 \pm 0.35$ & $24.9 \pm 22.7$ & $24197 \pm 1910$ & 7/0 \\
+4 & dense & 8 & small & 0.10 [0.02, 0.40] & $-41.3 \pm 82.9$ & $0.15 \pm 0.23$ & $6.9 \pm 4.4$ & $32510 \pm 4815$ & 9/0 \\
+4 & dense & 8 & medium & 0.00 [0.00, 0.28] & $-63.1 \pm 11.5$ & $0.00 \pm 0.00$ & $2.5 \pm 0.9$ & $33842 \pm 496$ & 10/0 \\
+4 & dense & 8 & large & 0.00 [0.00, 0.28] & $-69.3 \pm 12.9$ & $0.00 \pm 0.00$ & $7.0 \pm 5.8$ & $29350 \pm 271$ & 10/0 \\
+4 & dense & 26 & small & 0.00 [0.00, 0.28] & $9.0 \pm 61.6$ & $0.25 \pm 0.22$ & $7.4 \pm 3.3$ & $27692 \pm 3403$ & 10/0 \\
+4 & dense & 26 & medium & 0.10 [0.02, 0.40] & $-42.6 \pm 44.7$ & $0.17 \pm 0.24$ & $11.9 \pm 9.5$ & $27258 \pm 2325$ & 9/0 \\
+4 & dense & 26 & large & 0.00 [0.00, 0.28] & $-71.7 \pm 10.8$ & $0.00 \pm 0.00$ & $7.7 \pm 4.3$ & $18868 \pm 4760$ & 10/0 \\
+\bottomrule
+\end{tabular}
+\caption{Full factorial results, 10 runs per configuration. Grid dimensions are defined in B4. Continuous values are mean $\pm$ 95\% CI half-width; success uses Wilson intervals. Coll./limit counts collision and step-limit episodes.}
+\label{tab:b4-full}
+\end{table}
 
 % \section*{References}
 % \begin{thebibliography}{9}
